@@ -77,6 +77,15 @@ def data_load_single(args, dataset):
         X_test_ts = torch.tensor(data_all['timestamps']['test'])
         X_val_ts = torch.tensor(data_all['timestamps']['val'])
 
+    elif 'MciTRT' in dataset:
+        print("Loading custom dataset")
+        X_train_ts = torch.tensor(data_all['timestamps']['train'])
+        X_test_ts = torch.tensor(data_all['timestamps']['test'])
+        X_val_ts = torch.tensor(data_all['timestamps']['val'])
+
+    else:
+        raise NotImplementedError(f"Not implemented dataset {dataset}")
+
     my_scaler = MinMaxNormalization()
     MAX = max(torch.max(X_train).item(), torch.max(X_test).item(), torch.max(X_val).item())
     MIN = min(torch.min(X_train).item(), torch.min(X_test).item(), torch.min(X_val).item())

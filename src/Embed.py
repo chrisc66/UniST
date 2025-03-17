@@ -81,7 +81,7 @@ class DataEmbedding(nn.Module):
         N, T, C, H, W = x.shape
         TokenEmb = self.value_embedding(x)
         TimeEmb = self.temporal_embedding(x_mark)
-        assert TokenEmb.shape[1] == TimeEmb.shape[1] * H // self.args.patch_size * W // self.args.patch_size
+        assert (TokenEmb.shape[1]) == ((TimeEmb.shape[1]) * (H // self.args.patch_size) * (W // self.args.patch_size))
         TimeEmb = torch.repeat_interleave(TimeEmb, TokenEmb.shape[1]//TimeEmb.shape[1], dim=1)
         assert TokenEmb.shape == TimeEmb.shape
         if is_time==1:
