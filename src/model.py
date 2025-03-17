@@ -304,10 +304,10 @@ class UniST(nn.Module):
 
         self.pos_emb = pos_emb
 
-        self.Embedding = DataEmbedding(1, embed_dim, args=args)
+        self.Embedding = DataEmbedding(1, embed_dim, args=args, size1=52, size2=10)
 
         #if 'TDrive' in args.dataset or 'BikeNYC2' in args.dataset:
-        self.Embedding_24 = DataEmbedding(1, embed_dim, args=args, size1=24, size2 = 7)
+        self.Embedding_24 = DataEmbedding(1, embed_dim, args=args, size1=52, size2=10)
 
         if args.prompt_ST != 0:
             self.st_prompt = Prompt_ST(args.num_memory_spatial, args.num_memory_temporal, embed_dim, self.args.his_len, args.conv_num, args=args)

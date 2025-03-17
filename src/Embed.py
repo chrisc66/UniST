@@ -48,8 +48,8 @@ class TemporalEmbedding(nn.Module):
     def __init__(self, d_model, t_patch_size = 1, hour_size=48, weekday_size = 7):
         super(TemporalEmbedding, self).__init__()
 
-        hour_size = hour_size
-        weekday_size = weekday_size
+        hour_size = hour_size # Week
+        weekday_size = weekday_size # Year
 
         self.hour_embed = nn.Embedding(hour_size, d_model)
         self.weekday_embed = nn.Embedding(weekday_size, d_model)
