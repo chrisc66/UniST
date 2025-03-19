@@ -743,4 +743,4 @@ class UniST(nn.Module):
 
         loss1, loss2, target = self.forward_loss(imgs, pred, mask)
         
-        return loss1, loss2, pred, target, mask
+        return loss1, loss2, pred, target, mask, ids_restore, input_size

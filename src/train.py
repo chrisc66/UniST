@@ -39,14 +39,149 @@ class TrainLoop:
         self.opt.step()
         return loss, num, loss_real, num2
 
+
+    def extract_predictions(self, pred, target, mask, ids_restore, input_size, dataset_name):
+        """
+        Extract both masked and unmasked predictions
+        Args:
+            pred: model predictions [N, L, patch_size**2 * 1]
+            target: ground truth [N, L, patch_size**2 * 1]
+            mask: masking tensor [N, L]
+            ids_restore: indices to restore original sequence
+            input_size: tuple of (T, H, W) for reshaping
+            dataset_name: name of dataset for scaler
+        """
+        N = pred.shape[0]
+        T, H, W = input_size
+        C = pred.shape[-1]
+
+        # 1. Get masked predictions
+        pred_masked = pred.squeeze(dim=2)[mask==1]
+        target_masked = target.squeeze(dim=2)[mask==1]
+
+        # 2. Restore full sequence using ids_restore
+        # For predictions
+        pred_full = torch.zeros(N, T*H*W, C, device=pred.device)
+        pred_full[mask==0] = pred[mask==0]  # Keep unmasked predictions
+        pred_full[mask==1] = pred[mask==1]  # Add masked predictions
+        pred_full = torch.gather(pred_full, dim=1, 
+                            index=ids_restore.unsqueeze(-1).repeat(1, 1, pred_full.shape[-1]))
+
+        # For targets
+        target_full = torch.zeros(N, T*H*W, C, device=target.device)
+        target_full[mask==0] = target[mask==0]  # Keep unmasked targets
+        target_full[mask==1] = target[mask==1]  # Add masked targets
+        target_full = torch.gather(target_full, dim=1, 
+                                index=ids_restore.unsqueeze(-1).repeat(1, 1, target_full.shape[-1]))
+        
+        print(f"pred_full {pred_full.shape}, target_full {target_full.shape}")
+
+        # 3. Unpatchify to get spatial format
+        pred_spatial = self.model.unpatchify(pred_full)
+        target_spatial = self.model.unpatchify(target_full)
+
+        # 4. Convert to original scale
+        pred_numpy = pred_spatial.detach().cpu().numpy()
+        target_numpy = target_spatial.detach().cpu().numpy()
+
+        pred_original = self.args.scaler[dataset_name].inverse_transform(
+            pred_numpy.reshape(-1, 1)).reshape(pred_numpy.shape)
+        target_original = self.args.scaler[dataset_name].inverse_transform(
+            target_numpy.reshape(-1, 1)).reshape(target_numpy.shape)
+
+        return {
+            'masked': {
+                'predictions': pred_masked.detach().cpu().numpy(),
+                'targets': target_masked.detach().cpu().numpy()
+            },
+            'full': {
+                'normalized': {
+                    'predictions': pred_numpy,
+                    'targets': target_numpy
+                },
+                'original_scale': {
+                    'predictions': pred_original,
+                    'targets': target_original
+                }
+            },
+            'spatial_shape': (N, T, H, W),
+            'mask': mask.detach().cpu().numpy()
+        }
+
+
+    def visualize_full_predictions(self, results, epoch, dataset_name):
+        """
+        Visualize full unmasked predictions
+        """
+        import matplotlib.pyplot as plt
+        import os
+        
+        pred = results['full']['original_scale']['predictions']
+        target = results['full']['original_scale']['targets']
+        N, T, H, W = results['spatial_shape']
+
+        # 1. Spatial visualization
+        plt.figure(figsize=(15, 5))
+        
+        # Plot target
+        plt.subplot(131)
+        plt.imshow(target[0, T//2])  # Middle timestep
+        plt.title('Target')
+        plt.colorbar()
+        
+        # Plot prediction
+        plt.subplot(132)
+        plt.imshow(pred[0, T//2])
+        plt.title('Prediction')
+        plt.colorbar()
+        
+        # Plot difference
+        plt.subplot(133)
+        plt.imshow(np.abs(pred[0, T//2] - target[0, T//2]))
+        plt.title('Absolute Error')
+        plt.colorbar()
+        
+        plt.suptitle(f'Epoch {epoch} - Timestep {T//2}')
+        plt.tight_layout()
+        plt.savefig(f"{self.args.model_path}/full_predictions_epoch_{epoch}.png")
+        plt.close()
+
+        # 2. Temporal evolution
+        plt.figure(figsize=(20, 5))
+        timesteps = [0, T//4, T//2, 3*T//4, -1]
+        for i, t in enumerate(timesteps):
+            plt.subplot(2, len(timesteps), i+1)
+            plt.imshow(target[0, t])
+            plt.title(f'Target t={t}')
+            plt.colorbar()
+            
+            plt.subplot(2, len(timesteps), i+1+len(timesteps))
+            plt.imshow(pred[0, t])
+            plt.title(f'Prediction t={t}')
+            plt.colorbar()
+        
+        os.makedirs(f"{self.args.model_path}/", exist_ok=True)
+        plt.suptitle(f'Epoch {epoch} - Temporal Evolution')
+        plt.tight_layout()
+        plt.savefig(f"{self.args.model_path}/temporal_evolution_epoch_{epoch}.png")
+        plt.close()
+
     def Sample(self, test_data, step, mask_ratio, mask_strategy, seed=None, dataset='', index=0, Type='val'):
         
         with torch.no_grad():
+            all_predictions = []
+
             error_mae, error_norm, error, num, error2, num2 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
             
             for _, batch in enumerate(test_data[index]):
                 
-                loss, _, pred, target, mask = self.model_forward(batch, self.model, mask_ratio, mask_strategy, seed=seed, data = dataset, mode='forward')
+                loss, _, pred, target, mask, ids_restore, input_size = self.model_forward(batch, self.model, mask_ratio, mask_strategy, seed=seed, data = dataset, mode='forward')
+
+                # Extract both masked and unmasked predictions
+                results = self.extract_predictions(
+                    pred, target, mask, ids_restore, input_size, dataset
+                )
+                all_predictions.append(results)
 
                 pred = torch.clamp(pred, min=-1, max=1)
 
@@ -208,7 +343,7 @@ class TrainLoop:
 
         batch = [i.to(self.device) for i in batch]
 
-        loss, loss2, pred, target, mask = self.model(
+        loss, loss2, pred, target, mask, ids_restore, input_size = self.model(
                 batch,
                 mask_ratio=mask_ratio,
                 mask_strategy = mask_strategy, 
@@ -216,9 +351,9 @@ class TrainLoop:
                 data = data,
                 mode = mode, 
             )
-        return loss, loss2, pred, target, mask 
+        return loss, loss2, pred, target, mask, ids_restore, input_size 
 
-    def forward_backward(self, batch, step, mask_ratio, mask_strategy,index, name=None):
+    def forward_backward(self, batch, step, mask_ratio, mask_strategy, index, name=None):
 
         loss, _, pred, target, mask = self.model_forward(batch, self.model, mask_ratio, mask_strategy, data=name, mode='backward')
 

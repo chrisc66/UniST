@@ -111,6 +111,8 @@ def data_load_single(args, dataset):
         batch_size = args.batch_size_2
     elif H + W < 64:
         batch_size = args.batch_size_3
+    else:
+        batch_size = args.batch_size_3
 
     data = th.utils.data.DataLoader(data, num_workers=4, batch_size=batch_size, shuffle=True) 
     test_data = th.utils.data.DataLoader(test_data, num_workers=4, batch_size = 4 * batch_size, shuffle=False)

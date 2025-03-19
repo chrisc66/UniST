@@ -50,6 +50,8 @@ class TemporalEmbedding(nn.Module):
 
         hour_size = hour_size # Week
         weekday_size = weekday_size # Year
+        self.weekday_size = weekday_size
+        self.hour_size = hour_size
 
         self.hour_embed = nn.Embedding(hour_size, d_model)
         self.weekday_embed = nn.Embedding(weekday_size, d_model)
