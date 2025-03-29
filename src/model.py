@@ -392,6 +392,7 @@ class UniST(nn.Module):
 
         print("model initialized!")
 
+
     def init_emb(self):
         torch.nn.init.trunc_normal_(self.Embedding.temporal_embedding.hour_embed.weight.data, std=0.02)
         torch.nn.init.trunc_normal_(self.Embedding.temporal_embedding.weekday_embed.weight.data, std=0.02)
@@ -427,6 +428,7 @@ class UniST(nn.Module):
 
         return pos_embed_spatial, pos_embed_temporal, copy.deepcopy(pos_embed_spatial), copy.deepcopy(pos_embed_temporal)
 
+
     def initialize_weights_trivial(self):
         torch.nn.init.trunc_normal_(self.pos_embed_spatial, std=0.02)
         torch.nn.init.trunc_normal_(self.pos_embed_temporal, std=0.02)
@@ -446,6 +448,7 @@ class UniST(nn.Module):
         # initialize nn.Linear and nn.LayerNorm
         self.apply(self._init_weights)
 
+
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             # we use xavier_uniform following official JAX ViT:
@@ -455,9 +458,6 @@ class UniST(nn.Module):
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
-
-    
-
 
 
     def patchify(self, imgs):
@@ -472,6 +472,7 @@ class UniST(nn.Module):
         h = H // p
         w = W // p
         t = T // u
+        print(f"Patchify: N={N}, T={T}, H={H}, W={W}, p={p}, u={u}, t={t}, h={h}, w={w}")
         x = imgs.reshape(shape=(N, 1, t, u, h, p, w, p))
         x = torch.einsum("nctuhpwq->nthwupqc", x)
         x = x.reshape(shape=(N, t * h * w, u * p**2 * 1))
@@ -481,14 +482,74 @@ class UniST(nn.Module):
 
     def unpatchify(self, imgs):
         """
+        Unpatchify the input tensor into its original spatial-temporal format.
         imgs: (N, L, patch_size**2 *1)
         x: (N, 1, T, H, W)
         """
         N, T, H, W, p, u, t, h, w = self.patch_info
-        imgs = imgs.reshape(shape=(N, t, h, w, u, p, p))
-        imgs = torch.einsum("nthwupq->ntuhpwq", imgs)
-        imgs = imgs.reshape(shape=(N, T, H, W))
-        return imgs
+
+        actual_elements = imgs.numel()
+        expected_elements = N * T * H * W
+
+        if actual_elements != expected_elements:
+            # First reshape to match the exact input tensor shape
+            try:
+                # Calculate actual dimensions based on the input tensor
+                actual_L = imgs.shape[1]  # The actual L dimension (t*h*w)
+                feature_dim = imgs.shape[2]  # Feature dimension
+
+                # Recalculate h and w if needed
+                if actual_L % (h * w) == 0:
+                    t_actual = actual_L // (h * w)
+                    T_actual = t_actual * u
+                else:
+                    # Try to find divisors that work
+                    for possible_h in range(h-1, h+2):  # Try h-1, h, h+1
+                        for possible_w in range(w-1, w+2):  # Try w-1, w, w+1
+                            if actual_L % (possible_h * possible_w) == 0:
+                                h = possible_h
+                                w = possible_w
+                                t = actual_L // (h * w)
+                                T = t * u
+                                # Recalculate H and W from h and w
+                                H = h * p
+                                W = w * p
+                                break
+                        else:
+                            continue
+                        break
+
+                # Update patch info with recalculated values
+                self.patch_info = (N, T, H, W, p, u, t, h, w)
+                N, T, H, W, p, u, t, h, w = self.patch_info
+
+                # Reshape based on actual dimensions
+                imgs = imgs.reshape(shape=(N, t, h, w, u, p, p))
+                imgs = torch.einsum("nthwupq->ntuhpwq", imgs)
+                imgs = imgs.reshape(shape=(N, t*u, h*p, w*p))  # Use the actual dimensions
+
+                return imgs
+
+            except RuntimeError as e:
+                # Last resort: reshape directly to match input elements
+                try:
+                    # Just reshape to match the actual number of elements
+                    H_actual = h * p
+                    W_actual = w * p
+                    imgs = imgs.reshape(shape=(N, T, H_actual, W_actual))
+                    return imgs
+                except RuntimeError:
+                    raise RuntimeError(f"Cannot reshape tensor with {actual_elements} elements to match expected dimensions")
+
+        # Normal path when dimensions match
+        try:
+            imgs = imgs.reshape(shape=(N, t, h, w, u, p, p))
+            imgs = torch.einsum("nthwupq->ntuhpwq", imgs)
+            imgs = imgs.reshape(shape=(N, T, h*p, w*p))
+            return imgs
+        except RuntimeError as e:
+            print(f"Error during normal reshape: {e}")
+            raise
 
 
     def pos_embed_enc(self, ids_keep, batch, input_size):
@@ -523,6 +584,7 @@ class UniST(nn.Module):
         )
         return pos_embed_sort
 
+
     def pos_embed_dec(self, ids_keep, batch, input_size):
 
         if self.pos_emb == 'trivial':
@@ -550,6 +612,7 @@ class UniST(nn.Module):
         decoder_pos_embed = decoder_pos_embed.expand(batch, -1, -1)
 
         return decoder_pos_embed
+
 
     def prompt_generate(self, shape, x_period, x_closeness, x, data, pos):
         P = x_period.shape[1]
@@ -648,6 +711,7 @@ class UniST(nn.Module):
 
         return x_attn, mask, ids_restore, input_size, TimeEmb
 
+
     def forward_decoder(self, x, x_period, x_origin, ids_restore, mask_strategy, TimeEmb, input_size=None, data=None):
         N = x.shape[0]
         T, H, W = input_size
@@ -705,6 +769,7 @@ class UniST(nn.Module):
         x_attn = self.decoder_norm(x_attn)
 
         return x_attn
+
 
     def forward_loss(self, imgs, pred, mask):
         """

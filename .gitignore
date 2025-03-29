@@ -1,3 +1,6 @@
+# Python virtual environment
+venv/
+
 # Build and Release Folders
 *__pycache__/
 *.ipynb_checkpoints/
@@ -31,8 +34,7 @@
 *.ipa
 *.apk
 *.pyc
-*.ipynb_checkpoints/
-
+*.pkl
 
 # Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
 # should NOT be excluded as they contain compiler settings and other important

@@ -1,2 +1,5 @@
-
-python main.py --device_id 2 --machine machine --task short --size middle   --prompt_ST 1  --pred_len 6 --his_len 6  --num_memory_spatial 512 --num_memory_temporal 512  --prompt_content 's_p_c'  --dataset Crowd*TaxiBJ*Cellular*BikeNYC*TaxiNYC*BikeNYC2*TDrive*TaxiNYC2*TrafficBJ*TrafficCD*TrafficCS*TrafficGY*TrafficGZ*TrafficJN*TrafficNJ*TrafficSH*TrafficSZ*TrafficTJ*TrafficZZ*TrafficHZ*TrafficWH    --lr 3e-4 --used_data 'diverse' --file_load_path  pretrained_model_path  
+# export DATASET="Crowd*Cellular*BikeNYC*BikeNYC2*TaxiNYC*TaxiNYC2*TrafficCD*TrafficHZ*TrafficJN*TrafficNJ"
+# export PRETRAINED_MODEL_PATH="./experiments/Pretrain_Dataset_Crowd*Cellular*BikeNYC*BikeNYC2*TaxiNYC*TaxiNYC2*TrafficCD*TrafficHZ*TrafficJN*TrafficNJ_Task_short_FewRatio_0.5/model_save/model_best"
+export DATASET="MciTRT"
+export PRETRAINED_MODEL_PATH="./experiments/Pretrain_Dataset_MciTRT_Task_short_FewRatio_0.5/model_save/model_best"
+python main.py --device_id 0 --machine machine --task short --size middle --prompt_ST 1  --pred_len 6 --his_len 6 --num_memory_spatial 512 --num_memory_temporal 512 --prompt_content 's_p_c'  --dataset $DATASET --lr 3e-4 --used_data 'diverse' --file_load_path $PRETRAINED_MODEL_PATH

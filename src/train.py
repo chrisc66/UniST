@@ -5,6 +5,7 @@ import numpy as np
 from sklearn.metrics import mean_squared_error,mean_absolute_error
 import math
 import time
+import matplotlib.pyplot as plt
 
 
 class TrainLoop:
@@ -44,8 +45,8 @@ class TrainLoop:
         """
         Extract both masked and unmasked predictions
         Args:
-            pred: model predictions [N, L, patch_size**2 * 1]
-            target: ground truth [N, L, patch_size**2 * 1]
+            pred: model predictions [N, L, patch_size**2 * t_patch_size]
+            target: ground truth [N, L, patch_size**2 * t_patch_size]
             mask: masking tensor [N, L]
             ids_restore: indices to restore original sequence
             input_size: tuple of (T, H, W) for reshaping
@@ -53,30 +54,37 @@ class TrainLoop:
         """
         N = pred.shape[0]
         T, H, W = input_size
-        C = pred.shape[-1]
+        p = self.model.args.patch_size
+        u = self.model.args.t_patch_size
+
+        # Calculate expected dimensions
+        t = T // u  # number of temporal patches
+        h = H // p  # height in patches
+        w = W // p  # width in patches
 
         # 1. Get masked predictions
-        pred_masked = pred.squeeze(dim=2)[mask==1]
-        target_masked = target.squeeze(dim=2)[mask==1]
+        mask_expanded = mask.unsqueeze(-1).expand(-1, -1, pred.shape[-1])
+        pred_masked = pred[mask_expanded==1]
+        target_masked = target[mask_expanded==1]
 
         # 2. Restore full sequence using ids_restore
-        # For predictions
-        pred_full = torch.zeros(N, T*H*W, C, device=pred.device)
-        pred_full[mask==0] = pred[mask==0]  # Keep unmasked predictions
-        pred_full[mask==1] = pred[mask==1]  # Add masked predictions
-        pred_full = torch.gather(pred_full, dim=1, 
-                            index=ids_restore.unsqueeze(-1).repeat(1, 1, pred_full.shape[-1]))
+        # Initialize tensors with the correct number of patches
+        pred_full = torch.zeros((N, t * h * w, u * p * p), device=pred.device)
+        target_full = torch.zeros((N, t * h * w, u * p * p), device=target.device)
 
-        # For targets
-        target_full = torch.zeros(N, T*H*W, C, device=target.device)
-        target_full[mask==0] = target[mask==0]  # Keep unmasked targets
-        target_full[mask==1] = target[mask==1]  # Add masked targets
-        target_full = torch.gather(target_full, dim=1, 
-                                index=ids_restore.unsqueeze(-1).repeat(1, 1, target_full.shape[-1]))
-        
-        print(f"pred_full {pred_full.shape}, target_full {target_full.shape}")
+        # Only fill in the positions specified by ids_restore
+        for i in range(ids_restore.shape[1]):
+            pred_full[:, ids_restore[:, i], :] = pred[:, i, :]
+            target_full[:, ids_restore[:, i], :] = target[:, i, :]
+
+        # Store patch info in model for unpatchify
+        self.model.patch_info = (N, T, H, W, p, u, t, h, w)
 
         # 3. Unpatchify to get spatial format
+        # First reshape to match expected format: (N, t*h*w, u*p*p)
+        pred_full = pred_full.reshape(N, t * h * w, u * p * p)
+        target_full = target_full.reshape(N, t * h * w, u * p * p)
+
         pred_spatial = self.model.unpatchify(pred_full)
         target_spatial = self.model.unpatchify(target_full)
 
@@ -88,6 +96,56 @@ class TrainLoop:
             pred_numpy.reshape(-1, 1)).reshape(pred_numpy.shape)
         target_original = self.args.scaler[dataset_name].inverse_transform(
             target_numpy.reshape(-1, 1)).reshape(target_numpy.shape)
+
+        # Create and save plots for middle timestep
+        plt.figure(figsize=(15, 5))
+
+        # Ground truth - use the unpatchified data
+        plt.subplot(131)
+        plt.imshow(target_spatial[0, T//2].detach().cpu().numpy())
+        plt.title('Ground Truth')
+        plt.colorbar()
+
+        # Prediction - use the unpatchified data
+        plt.subplot(132)
+        plt.imshow(pred_spatial[0, T//2].detach().cpu().numpy())
+        plt.title('Prediction')
+        plt.colorbar()
+
+        # Absolute error - use the unpatchified data
+        plt.subplot(133)
+        plt.imshow(np.abs(pred_spatial[0, T//2].detach().cpu().numpy() - target_spatial[0, T//2].detach().cpu().numpy()))
+        plt.title('Absolute Error')
+        plt.colorbar()
+
+        plt.suptitle('Middle Timestep Visualization')
+        plt.tight_layout()
+        plt.savefig(f"{self.args.model_path}/middle_timestep_visualization.png")
+        plt.close()
+
+        # Create and save plots for temporal evolution
+        plt.figure(figsize=(20, 5))
+        timesteps = [0, T//4, T//2, 3*T//4, -1]
+        for i, t_idx in enumerate(timesteps):
+            if t_idx == -1:
+                t_idx = T - 1
+
+            # Ground truth
+            plt.subplot(2, len(timesteps), i + 1)
+            plt.imshow(target_spatial[0, t_idx].detach().cpu().numpy())
+            plt.title(f'Ground Truth t={t_idx}')
+            plt.colorbar()
+            
+            # Prediction
+            plt.subplot(2, len(timesteps), i + 1 + len(timesteps))
+            plt.imshow(pred_spatial[0, t_idx].detach().cpu().numpy())
+            plt.title(f'Prediction t={t_idx}')
+            plt.colorbar()
+        
+        plt.suptitle('Temporal Evolution Visualization')
+        plt.tight_layout()
+        plt.savefig(f"{self.args.model_path}/temporal_evolution_visualization.png")
+        plt.close()
 
         return {
             'masked': {
@@ -108,63 +166,6 @@ class TrainLoop:
             'mask': mask.detach().cpu().numpy()
         }
 
-
-    def visualize_full_predictions(self, results, epoch, dataset_name):
-        """
-        Visualize full unmasked predictions
-        """
-        import matplotlib.pyplot as plt
-        import os
-        
-        pred = results['full']['original_scale']['predictions']
-        target = results['full']['original_scale']['targets']
-        N, T, H, W = results['spatial_shape']
-
-        # 1. Spatial visualization
-        plt.figure(figsize=(15, 5))
-        
-        # Plot target
-        plt.subplot(131)
-        plt.imshow(target[0, T//2])  # Middle timestep
-        plt.title('Target')
-        plt.colorbar()
-        
-        # Plot prediction
-        plt.subplot(132)
-        plt.imshow(pred[0, T//2])
-        plt.title('Prediction')
-        plt.colorbar()
-        
-        # Plot difference
-        plt.subplot(133)
-        plt.imshow(np.abs(pred[0, T//2] - target[0, T//2]))
-        plt.title('Absolute Error')
-        plt.colorbar()
-        
-        plt.suptitle(f'Epoch {epoch} - Timestep {T//2}')
-        plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/full_predictions_epoch_{epoch}.png")
-        plt.close()
-
-        # 2. Temporal evolution
-        plt.figure(figsize=(20, 5))
-        timesteps = [0, T//4, T//2, 3*T//4, -1]
-        for i, t in enumerate(timesteps):
-            plt.subplot(2, len(timesteps), i+1)
-            plt.imshow(target[0, t])
-            plt.title(f'Target t={t}')
-            plt.colorbar()
-            
-            plt.subplot(2, len(timesteps), i+1+len(timesteps))
-            plt.imshow(pred[0, t])
-            plt.title(f'Prediction t={t}')
-            plt.colorbar()
-        
-        os.makedirs(f"{self.args.model_path}/", exist_ok=True)
-        plt.suptitle(f'Epoch {epoch} - Temporal Evolution')
-        plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/temporal_evolution_epoch_{epoch}.png")
-        plt.close()
 
     def Sample(self, test_data, step, mask_ratio, mask_strategy, seed=None, dataset='', index=0, Type='val'):
         
@@ -355,7 +356,7 @@ class TrainLoop:
 
     def forward_backward(self, batch, step, mask_ratio, mask_strategy, index, name=None):
 
-        loss, _, pred, target, mask = self.model_forward(batch, self.model, mask_ratio, mask_strategy, data=name, mode='backward')
+        loss , _, pred, target, mask, _, _ = self.model_forward(batch, self.model, mask_ratio, mask_strategy, data=name, mode='backward')
 
         pred_mask = pred.squeeze(dim=2)[mask==1]
         target_mask = target.squeeze(dim=2)[mask==1]
