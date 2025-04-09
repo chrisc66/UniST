@@ -6,6 +6,9 @@ from sklearn.metrics import mean_squared_error,mean_absolute_error
 import math
 import time
 import matplotlib.pyplot as plt
+import json
+import os
+import copy
 
 
 class TrainLoop:
@@ -41,14 +44,13 @@ class TrainLoop:
         return loss, num, loss_real, num2
 
 
-    def extract_predictions(self, pred, target, mask, ids_restore, input_size, dataset_name):
+    def extract_predictions(self, pred, target, mask, input_size, dataset_name):
         """
         Extract both masked and unmasked predictions
         Args:
             pred: model predictions [N, L, patch_size**2 * t_patch_size]
             target: ground truth [N, L, patch_size**2 * t_patch_size]
             mask: masking tensor [N, L]
-            ids_restore: indices to restore original sequence
             input_size: tuple of (T, H, W) for reshaping
             dataset_name: name of dataset for scaler
         """
@@ -57,95 +59,189 @@ class TrainLoop:
         p = self.model.args.patch_size
         u = self.model.args.t_patch_size
 
-        # Calculate expected dimensions
-        t = T // u  # number of temporal patches
-        h = H // p  # height in patches
-        w = W // p  # width in patches
+        T = T * 2       # double sequence length (hist == prediction)
+        t = T // u      # temporal patches
+        h = H           # height patches (already divided in forward_encoder)
+        w = W           # width patches (already divided in forward_encoder)
+        H_orig = H * p  # Convert back to pixel dimensions
+        W_orig = W * p  # Convert back to pixel dimensions
 
-        # 1. Get masked predictions
+        self.model.patch_info = (N, T, H_orig, W_orig, p, u, t, h, w)
+
+        # Masked data
         mask_expanded = mask.unsqueeze(-1).expand(-1, -1, pred.shape[-1])
         pred_masked = pred[mask_expanded==1]
         target_masked = target[mask_expanded==1]
 
-        # 2. Restore full sequence using ids_restore
-        # Initialize tensors with the correct number of patches
-        pred_full = torch.zeros((N, t * h * w, u * p * p), device=pred.device)
-        target_full = torch.zeros((N, t * h * w, u * p * p), device=target.device)
+        # Unpatch data
+        pred_patched = copy.deepcopy(pred).reshape(N, t * h * w, u * p * p)
+        target_patched = copy.deepcopy(target).reshape(N, t * h * w, u * p * p)
 
-        # Only fill in the positions specified by ids_restore
-        for i in range(ids_restore.shape[1]):
-            pred_full[:, ids_restore[:, i], :] = pred[:, i, :]
-            target_full[:, ids_restore[:, i], :] = target[:, i, :]
+        pred_unpatched = self.model.unpatchify(pred_patched).reshape(N, T, H_orig, W_orig)
+        target_unpatched = self.model.unpatchify(target_patched).reshape(N, T, H_orig, W_orig)
 
-        # Store patch info in model for unpatchify
-        self.model.patch_info = (N, T, H, W, p, u, t, h, w)
+        # Un-normalize data original scale
+        pred_numpy = pred_unpatched.detach().cpu().numpy()
+        target_numpy = target_unpatched.detach().cpu().numpy()
 
-        # 3. Unpatchify to get spatial format
-        # First reshape to match expected format: (N, t*h*w, u*p*p)
-        pred_full = pred_full.reshape(N, t * h * w, u * p * p)
-        target_full = target_full.reshape(N, t * h * w, u * p * p)
+        pred_unnormalized = self.args.scaler[dataset_name].inverse_transform(pred_numpy.reshape(-1, 1)).reshape(pred_numpy.shape)
+        target_unnormalized = self.args.scaler[dataset_name].inverse_transform(target_numpy.reshape(-1, 1)).reshape(target_numpy.shape)
 
-        pred_spatial = self.model.unpatchify(pred_full)
-        target_spatial = self.model.unpatchify(target_full)
+        os.makedirs(f"{self.args.model_path}/plots", exist_ok=True)
 
-        # 4. Convert to original scale
-        pred_numpy = pred_spatial.detach().cpu().numpy()
-        target_numpy = target_spatial.detach().cpu().numpy()
+        C = 100
 
-        pred_original = self.args.scaler[dataset_name].inverse_transform(
-            pred_numpy.reshape(-1, 1)).reshape(pred_numpy.shape)
-        target_original = self.args.scaler[dataset_name].inverse_transform(
-            target_numpy.reshape(-1, 1)).reshape(target_numpy.shape)
+        # 1. Masked Data
+        plt.figure(figsize=(100, 30))
 
-        # Create and save plots for middle timestep
-        plt.figure(figsize=(15, 5))
+        plt.subplot(311)
+        plt.plot(target_masked.detach().cpu().numpy(), label='Target')
+        plt.title(f'Masked Target ({target_masked.shape})')
+        plt.legend()
+        plt.grid()
 
-        # Ground truth - use the unpatchified data
+        plt.subplot(312)
+        plt.plot(pred_masked.detach().cpu().numpy(), label='Prediction')
+        plt.title(f'Masked Prediction ({pred_masked.shape})')
+        plt.legend()
+        plt.grid()
+
+        plt.subplot(313)
+        plt.plot(np.abs(target_masked.detach().cpu().numpy() - pred_masked.detach().cpu().numpy()), label='Absolute Error')
+        plt.title('Masked Absolute Error')
+        plt.legend()
+        plt.grid()
+
+        plt.suptitle('Masked Data Visualization')
+        plt.tight_layout()
+        plt.savefig(f"{self.args.model_path}/plots/1_masked.png")
+        plt.close()
+
+        # 1. Masked Data (Partial)
+        LEN = 50
+        plt.figure(figsize=(30, 10))
+
         plt.subplot(131)
-        plt.imshow(target_spatial[0, T//2].detach().cpu().numpy())
-        plt.title('Ground Truth')
-        plt.colorbar()
+        plt.bar(range(LEN), target_masked[:LEN].detach().cpu().numpy(), label='Target')
+        plt.title(f'Masked Target ({target_masked[:LEN].shape})')
+        plt.legend()
+        plt.grid()
 
-        # Prediction - use the unpatchified data
         plt.subplot(132)
-        plt.imshow(pred_spatial[0, T//2].detach().cpu().numpy())
-        plt.title('Prediction')
+        plt.bar(range(LEN), pred_masked[:LEN].detach().cpu().numpy(), label='Prediction')
+        plt.title(f'Masked Prediction ({pred_masked[:LEN].shape})')
+        plt.legend()
+        plt.grid()
+
+        plt.subplot(133)
+        plt.bar(range(LEN), np.abs(target_masked[:LEN].detach().cpu().numpy() - pred_masked[:LEN].detach().cpu().numpy()), label='Absolute Error')
+        plt.title('Masked Absolute Error')
+        plt.legend()
+        plt.grid()
+
+        plt.suptitle('Masked Data Visualization')
+        plt.tight_layout()
+        plt.savefig(f"{self.args.model_path}/plots/1_masked_partial.png")
+        plt.close()
+
+        # 2 Patched Data
+        plt.figure(figsize=(10, 10))
+
+        plt.subplot(131)
+        plt.imshow(target_patched[C].detach().cpu().numpy(), origin='lower', vmin=-1, vmax=1)
+        plt.title(f'Target ({target_patched[C].shape})')
         plt.colorbar()
 
-        # Absolute error - use the unpatchified data
+        plt.subplot(132)
+        plt.imshow(pred_patched[C].detach().cpu().numpy(), origin='lower', vmin=-1, vmax=1)
+        plt.title(f'Prediction ({pred_patched[C].shape})')
+        plt.colorbar()
+
         plt.subplot(133)
-        plt.imshow(np.abs(pred_spatial[0, T//2].detach().cpu().numpy() - target_spatial[0, T//2].detach().cpu().numpy()))
+        plt.imshow(np.abs(target_patched[C].detach().cpu().numpy() - pred_patched[C].detach().cpu().numpy()), origin='lower', vmin=-1, vmax=1)
         plt.title('Absolute Error')
         plt.colorbar()
 
-        plt.suptitle('Middle Timestep Visualization')
+        plt.suptitle('Patched Visualization')
         plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/middle_timestep_visualization.png")
+        plt.savefig(f"{self.args.model_path}/plots/2_patched.png")
         plt.close()
 
-        # Create and save plots for temporal evolution
-        plt.figure(figsize=(20, 5))
-        timesteps = [0, T//4, T//2, 3*T//4, -1]
+        # 3 Unpatched Data
+        plt.figure(figsize=(50, 10))
+        timesteps = range(0, T)
         for i, t_idx in enumerate(timesteps):
-            if t_idx == -1:
-                t_idx = T - 1
-
-            # Ground truth
-            plt.subplot(2, len(timesteps), i + 1)
-            plt.imshow(target_spatial[0, t_idx].detach().cpu().numpy())
-            plt.title(f'Ground Truth t={t_idx}')
+            plt.subplot(3, len(timesteps), i + 1)
+            plt.imshow(target_unpatched[C, t_idx].detach().cpu().numpy().T, vmin=-1, vmax=1)
+            plt.gca().invert_xaxis()
+            plt.title(f'Target t={t_idx}')
             plt.colorbar()
-            
-            # Prediction
-            plt.subplot(2, len(timesteps), i + 1 + len(timesteps))
-            plt.imshow(pred_spatial[0, t_idx].detach().cpu().numpy())
+
+            plt.subplot(3, len(timesteps), i + 1 + len(timesteps))
+            plt.imshow(pred_unpatched[C, t_idx].detach().cpu().numpy().T, vmin=-1, vmax=1)
+            plt.gca().invert_xaxis()
             plt.title(f'Prediction t={t_idx}')
             plt.colorbar()
-        
-        plt.suptitle('Temporal Evolution Visualization')
+
+            plt.subplot(3, len(timesteps), i + 1 + 2 * len(timesteps))
+            plt.imshow(np.abs(pred_unpatched[C, t_idx].detach().cpu().numpy().T - target_unpatched[C, t_idx].detach().cpu().numpy().T), vmin=-1, vmax=1)
+            plt.gca().invert_xaxis()
+            plt.title(f'Absolute Error t={t_idx}')
+            plt.colorbar()
+
+        plt.suptitle('Unpatched Visualization')
         plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/temporal_evolution_visualization.png")
+        plt.savefig(f"{self.args.model_path}/plots/3_unpatched.png")
         plt.close()
+
+        # 4 Un-normalized Data
+        plt.figure(figsize=(50, 10))
+        timesteps = range(0, T)
+        for i, t_idx in enumerate(timesteps):
+            plt.subplot(3, len(timesteps), i + 1)
+            plt.imshow(target_unnormalized[C, t_idx].T, vmin=0, vmax=22)
+            plt.gca().invert_xaxis()
+            plt.title(f'Target t={t_idx}')
+            plt.colorbar()
+
+            plt.subplot(3, len(timesteps), i + 1 + len(timesteps))
+            plt.imshow(pred_unnormalized[C, t_idx].T, vmin=0, vmax=22)
+            plt.gca().invert_xaxis()
+            plt.title(f'Prediction t={t_idx}')
+            plt.colorbar()
+
+            plt.subplot(3, len(timesteps), i + 1 + 2 * len(timesteps))
+            plt.imshow(np.abs(pred_unnormalized[C, t_idx].T - target_unnormalized[C, t_idx].T), vmin=0, vmax=22)
+            plt.gca().invert_xaxis()
+            plt.title(f'Absolute Error t={t_idx}')
+            plt.colorbar()
+
+        plt.suptitle('Un-normalized Visualization (Original Scale)')
+        plt.tight_layout()
+        plt.savefig(f"{self.args.model_path}/plots/4_unnormalized.png")
+        plt.close()
+
+        # Save json files
+        with open(f"{self.args.model_path}/plots/pred_model.json", "w") as pred_file:
+            json.dump(pred.tolist(), pred_file)
+        with open(f"{self.args.model_path}/plots/target_model.json", "w") as target_file:
+            json.dump(target.tolist(), target_file)
+        with open(f"{self.args.model_path}/plots/pred_masked.json", "w") as pred_file:
+            json.dump(pred_masked.tolist(), pred_file)
+        with open(f"{self.args.model_path}/plots/target_masked.json", "w") as target_file:
+            json.dump(target_masked.tolist(), target_file)
+        with open(f"{self.args.model_path}/plots/pred_patched.json", "w") as pred_file:
+            json.dump(pred_patched.tolist(), pred_file)
+        with open(f"{self.args.model_path}/plots/target_patched.json", "w") as target_file:
+            json.dump(target_patched.tolist(), target_file)
+        with open(f"{self.args.model_path}/plots/pred_unpatched.json", "w") as pred_file:
+            json.dump(pred_unpatched.tolist(), pred_file)
+        with open(f"{self.args.model_path}/plots/target_unpatched.json", "w") as target_file:
+            json.dump(target_unpatched.tolist(), target_file)
+        with open(f"{self.args.model_path}/plots/pred_unnormalized.json", "w") as pred_file:
+            json.dump(pred_unnormalized.tolist(), pred_file)
+        with open(f"{self.args.model_path}/plots/target_unnormalized.json", "w") as target_file:
+            json.dump(target_unnormalized.tolist(), target_file)
 
         return {
             'masked': {
@@ -158,8 +254,8 @@ class TrainLoop:
                     'targets': target_numpy
                 },
                 'original_scale': {
-                    'predictions': pred_original,
-                    'targets': target_original
+                    'predictions': pred_unnormalized,
+                    'targets': target_unnormalized
                 }
             },
             'spatial_shape': (N, T, H, W),
@@ -179,9 +275,7 @@ class TrainLoop:
                 loss, _, pred, target, mask, ids_restore, input_size = self.model_forward(batch, self.model, mask_ratio, mask_strategy, seed=seed, data = dataset, mode='forward')
 
                 # Extract both masked and unmasked predictions
-                results = self.extract_predictions(
-                    pred, target, mask, ids_restore, input_size, dataset
-                )
+                results = self.extract_predictions(pred, target, mask, input_size, dataset)
                 all_predictions.append(results)
 
                 pred = torch.clamp(pred, min=-1, max=1)

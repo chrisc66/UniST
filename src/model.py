@@ -16,22 +16,23 @@ import copy
 from Prompt_network import  Prompt_ST
 
 def UniST_model(args, **kwargs):
+    # Different model sizes (1-7 and 'middle', 'large')
     if args.size == '1':
         model = UniST(
-            embed_dim=64,
-            depth=2,
-            decoder_embed_dim = 64,
-            decoder_depth=2,
-            num_heads=4,
-            decoder_num_heads=2,
-            mlp_ratio=2,
-            t_patch_size = args.t_patch_size,
-            patch_size = args.patch_size,
-            norm_layer=partial(nn.LayerNorm, eps=1e-6),
-            pos_emb = args.pos_emb,
-            no_qkv_bias = args.no_qkv_bias,
-            args = args,
-            **kwargs,
+            embed_dim=64, # Embedding dimension (small)
+            depth=2, # Number of transformer blocks (shallow)
+            decoder_embed_dim = 64, # Embedding dimension for decoder
+            decoder_depth=2, # Number of transformer blocks for decoder
+            num_heads=4, # Number of attention heads
+            decoder_num_heads=2, # Number of attention heads for decoder
+            mlp_ratio=2, # Ratio for MLP hidden dimension
+            t_patch_size = args.t_patch_size, # Temporal patch size from args
+            patch_size = args.patch_size, # Spatial patch size from args
+            norm_layer=partial(nn.LayerNorm, eps=1e-6), # Normalization layer
+            pos_emb = args.pos_emb, # Position embedding type from args
+            no_qkv_bias = args.no_qkv_bias, # Whether to use bias in QKV transformation
+            args = args, # Pass the entire args object to the model
+            **kwargs, # Additional keyword arguments
         )
         return model
 
@@ -191,32 +192,50 @@ def UniST_model(args, **kwargs):
 class Attention(nn.Module):
     def __init__(
         self,
-        dim,
-        num_heads=8,
-        qkv_bias=False,
-        qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        input_size=(4, 14, 14),
+        dim,            # Total dimension of the input
+        num_heads=8,    # Number of attention heads
+        qkv_bias=False, # Whether to use bias in QKV transformation
+        qk_scale=None,  # Scaling factor for QK matrix
+        attn_drop=0.0,  # Dropout rate for attention
+        proj_drop=0.0,  # Dropout rate for projection
+        input_size=(4, 14, 14), # Input size (batch, height, width) 
     ):
         super().__init__()
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
         self.num_heads = num_heads
-        head_dim = dim // num_heads
+        head_dim = dim // num_heads  # Dimension allocated to each head
+        # qk_scale is optional user-provided scaling factor
+        # Default scaling factor (1/√head_dim)
+        # Purpose: Prevents attention scores from becoming too small or large
         self.scale = qk_scale or head_dim**-0.5
 
-        self.q = nn.Linear(dim, dim, bias=qkv_bias)
-        self.k = nn.Linear(dim, dim, bias=qkv_bias)
-        self.v = nn.Linear(dim, dim, bias=qkv_bias)
+        # QKV projection layers
+        # Project input into query, key, and value spaces for attention computation
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)     # Query projection
+        self.k = nn.Linear(dim, dim, bias=qkv_bias)     # Key projection
+        self.v = nn.Linear(dim, dim, bias=qkv_bias)     # Value projection
 
         assert attn_drop == 0.0  # do not use
+        # Creates a linear layer for final output projection
+        # Transforms attention output back to original dimension
         self.proj = nn.Linear(dim, dim, bias= qkv_bias)
         self.proj_drop = nn.Dropout(proj_drop)
         self.input_size = input_size
         assert input_size[1] == input_size[2]
 
+
+    """
+       Shape Transformations:
+        1. Input: [B, N, C]
+        2. After QKV Projection: [B, N, num_heads, head_dim]
+        3. After Permute: [B, num_heads, N, head_dim]
+        4. Attention Scores: [B, num_heads, N, N]
+        5. After Value Weighting: [B, num_heads, N, head_dim]
+        6. Final Output: [B, N, C]
+    """
     def forward(self, x):
-        B, N, C = x.shape
+        B, N, C = x.shape   # [batch_size, sequence_length, channels]
+        # Input Processing: Project input into Q, K, V
         q = (
             self.q(x)
             .reshape(B, N, self.num_heads, C // self.num_heads)
@@ -232,39 +251,74 @@ class Attention(nn.Module):
             .reshape(B, N, self.num_heads, C // self.num_heads)
             .permute(0, 2, 1, 3)
         )
-
+        """
+            Computes attention scores between queries and keys
+            @ is matrix multiplication
+            B - batch size
+            num_heads - number of attention heads
+            N - sequence length (The total number of spatial-temporal patches)
+            head_dim - dimension of each attention head
+            q: Shape [B, num_heads, N, head_dim]
+        """
+        # Computes attention scores between queries and keys
+        # @ is matrix multiplication
         attn = (q @ k.transpose(-2, -1)) * self.scale
 
+        # Convert to probability distribution
         attn = attn.softmax(dim=-1)
 
+        # Produces weighted sum of values based on attention scores
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        x = x.view(B, -1, C)
-        return x
 
+        # Final projection
+        # Applies a linear transformation to map the attention output back to the original dimension
+        # Ensures the output has the same dimensionality as the input for residual connections
+        x = self.proj(x)
+        
+        # Applies dropout to the projected output
+        # This is a regularization technique that randomly "drops" some values to zero during training
+        # Helps prevent overfitting by introducing randomness
+        x = self.proj_drop(x)
+        
+        #Ensures the output has the correct shape [B, N, C]
+        x = x.view(B, -1, C)
+        
+        """
+            Output Shape:
+            The output has shape [B, N, C] where:
+            B is the batch size (number of samples being processed simultaneously)
+            N is the sequence length (The total number of spatial-temporal patches)
+            C is the channel dimension (same as the input dimension)
+        """
+        return x
 
 class Block(nn.Module):
     """
-    Transformer Block with specified Attention function
+        The Block class implements a standard transformer block, which is the core component of transformer-based architectures. Each block consists of:
+        1. A multi-head attention mechanism
+        2. A feed-forward network (MLP)
+        3. Layer normalization
+        4. Residual connections
     """
 
     def __init__(
         self,
-        dim,
-        num_heads,
-        mlp_ratio=4.0,
-        qkv_bias=False,
-        qk_scale=None,
-        drop=0.0,
-        attn_drop=0.0,
-        drop_path=0.0,
-        act_layer=nn.GELU,
-        norm_layer=nn.LayerNorm,
-        attn_func=Attention,
+        dim, # Dimension of the input
+        num_heads, # Number of attention heads
+        mlp_ratio=4.0, # Ratio for MLP hidden dimension
+        qkv_bias=False, # Whether to use bias in QKV transformation
+        qk_scale=None, # Scaling factor for QK matrix
+        drop=0.0, # Dropout rate for projection
+        attn_drop=0.0, # Dropout rate for attention
+        drop_path=0.0, # Dropout rate for path
+        act_layer=nn.GELU, # Activation function
+        norm_layer=nn.LayerNorm, # Normalization layer
+        attn_func=Attention, # Attention function
     ):
         super().__init__()
+        # First normalization layer
         self.norm1 = norm_layer(dim)
+        # Multi-head attention mechanism
         self.attn = attn_func(
             dim,
             num_heads=num_heads,
@@ -472,7 +526,7 @@ class UniST(nn.Module):
         h = H // p
         w = W // p
         t = T // u
-        print(f"Patchify: N={N}, T={T}, H={H}, W={W}, p={p}, u={u}, t={t}, h={h}, w={w}")
+        # print(f"Patchify: N={N}, T={T}, H={H}, W={W}, p={p}, u={u}, t={t}, h={h}, w={w}")
         x = imgs.reshape(shape=(N, 1, t, u, h, p, w, p))
         x = torch.einsum("nctuhpwq->nthwupqc", x)
         x = x.reshape(shape=(N, t * h * w, u * p**2 * 1))
@@ -483,73 +537,14 @@ class UniST(nn.Module):
     def unpatchify(self, imgs):
         """
         Unpatchify the input tensor into its original spatial-temporal format.
-        imgs: (N, L, patch_size**2 *1)
-        x: (N, 1, T, H, W)
+        imgs: (N, L, patch_size**2 * t_patch_size)
+        Returns: (N, T, H, W)
         """
         N, T, H, W, p, u, t, h, w = self.patch_info
-
-        actual_elements = imgs.numel()
-        expected_elements = N * T * H * W
-
-        if actual_elements != expected_elements:
-            # First reshape to match the exact input tensor shape
-            try:
-                # Calculate actual dimensions based on the input tensor
-                actual_L = imgs.shape[1]  # The actual L dimension (t*h*w)
-                feature_dim = imgs.shape[2]  # Feature dimension
-
-                # Recalculate h and w if needed
-                if actual_L % (h * w) == 0:
-                    t_actual = actual_L // (h * w)
-                    T_actual = t_actual * u
-                else:
-                    # Try to find divisors that work
-                    for possible_h in range(h-1, h+2):  # Try h-1, h, h+1
-                        for possible_w in range(w-1, w+2):  # Try w-1, w, w+1
-                            if actual_L % (possible_h * possible_w) == 0:
-                                h = possible_h
-                                w = possible_w
-                                t = actual_L // (h * w)
-                                T = t * u
-                                # Recalculate H and W from h and w
-                                H = h * p
-                                W = w * p
-                                break
-                        else:
-                            continue
-                        break
-
-                # Update patch info with recalculated values
-                self.patch_info = (N, T, H, W, p, u, t, h, w)
-                N, T, H, W, p, u, t, h, w = self.patch_info
-
-                # Reshape based on actual dimensions
-                imgs = imgs.reshape(shape=(N, t, h, w, u, p, p))
-                imgs = torch.einsum("nthwupq->ntuhpwq", imgs)
-                imgs = imgs.reshape(shape=(N, t*u, h*p, w*p))  # Use the actual dimensions
-
-                return imgs
-
-            except RuntimeError as e:
-                # Last resort: reshape directly to match input elements
-                try:
-                    # Just reshape to match the actual number of elements
-                    H_actual = h * p
-                    W_actual = w * p
-                    imgs = imgs.reshape(shape=(N, T, H_actual, W_actual))
-                    return imgs
-                except RuntimeError:
-                    raise RuntimeError(f"Cannot reshape tensor with {actual_elements} elements to match expected dimensions")
-
-        # Normal path when dimensions match
-        try:
-            imgs = imgs.reshape(shape=(N, t, h, w, u, p, p))
-            imgs = torch.einsum("nthwupq->ntuhpwq", imgs)
-            imgs = imgs.reshape(shape=(N, T, h*p, w*p))
-            return imgs
-        except RuntimeError as e:
-            print(f"Error during normal reshape: {e}")
-            raise
+        imgs = imgs.reshape(N, t, h, w, u, p, p)
+        imgs = torch.einsum("nthwupq->ntuhpwq", imgs)
+        imgs = imgs.reshape(N, T, h * p, w * p)
+        return imgs
 
 
     def pos_embed_enc(self, ids_keep, batch, input_size):
