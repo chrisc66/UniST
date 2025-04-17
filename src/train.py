@@ -89,7 +89,7 @@ class TrainLoop:
 
         os.makedirs(f"{self.args.model_path}/plots", exist_ok=True)
 
-        C = 100
+        C = 0
 
         # 1. Masked Data
         plt.figure(figsize=(100, 30))
@@ -145,7 +145,7 @@ class TrainLoop:
         plt.close()
 
         # 2 Patched Data
-        plt.figure(figsize=(10, 10))
+        plt.figure(figsize=(10, 100))
 
         plt.subplot(131)
         plt.imshow(target_patched[C].detach().cpu().numpy(), origin='lower', vmin=-1, vmax=1)
@@ -172,19 +172,19 @@ class TrainLoop:
         timesteps = range(0, T)
         for i, t_idx in enumerate(timesteps):
             plt.subplot(3, len(timesteps), i + 1)
-            plt.imshow(target_unpatched[C, t_idx].detach().cpu().numpy().T, vmin=-1, vmax=1)
+            plt.imshow(target_unpatched[C, t_idx].detach().cpu().numpy(), vmin=-1, vmax=1)
             plt.gca().invert_xaxis()
             plt.title(f'Target t={t_idx}')
             plt.colorbar()
 
             plt.subplot(3, len(timesteps), i + 1 + len(timesteps))
-            plt.imshow(pred_unpatched[C, t_idx].detach().cpu().numpy().T, vmin=-1, vmax=1)
+            plt.imshow(pred_unpatched[C, t_idx].detach().cpu().numpy(), vmin=-1, vmax=1)
             plt.gca().invert_xaxis()
             plt.title(f'Prediction t={t_idx}')
             plt.colorbar()
 
             plt.subplot(3, len(timesteps), i + 1 + 2 * len(timesteps))
-            plt.imshow(np.abs(pred_unpatched[C, t_idx].detach().cpu().numpy().T - target_unpatched[C, t_idx].detach().cpu().numpy().T), vmin=-1, vmax=1)
+            plt.imshow(np.abs(pred_unpatched[C, t_idx].detach().cpu().numpy() - target_unpatched[C, t_idx].detach().cpu().numpy()), vmin=-1, vmax=1)
             plt.gca().invert_xaxis()
             plt.title(f'Absolute Error t={t_idx}')
             plt.colorbar()
@@ -199,19 +199,19 @@ class TrainLoop:
         timesteps = range(0, T)
         for i, t_idx in enumerate(timesteps):
             plt.subplot(3, len(timesteps), i + 1)
-            plt.imshow(target_unnormalized[C, t_idx].T, vmin=0, vmax=22)
+            plt.imshow(target_unnormalized[C, t_idx], vmin=0, vmax=22)
             plt.gca().invert_xaxis()
             plt.title(f'Target t={t_idx}')
             plt.colorbar()
 
             plt.subplot(3, len(timesteps), i + 1 + len(timesteps))
-            plt.imshow(pred_unnormalized[C, t_idx].T, vmin=0, vmax=22)
+            plt.imshow(pred_unnormalized[C, t_idx], vmin=0, vmax=22)
             plt.gca().invert_xaxis()
             plt.title(f'Prediction t={t_idx}')
             plt.colorbar()
 
             plt.subplot(3, len(timesteps), i + 1 + 2 * len(timesteps))
-            plt.imshow(np.abs(pred_unnormalized[C, t_idx].T - target_unnormalized[C, t_idx].T), vmin=0, vmax=22)
+            plt.imshow(np.abs(pred_unnormalized[C, t_idx] - target_unnormalized[C, t_idx]), vmin=0, vmax=22)
             plt.gca().invert_xaxis()
             plt.title(f'Absolute Error t={t_idx}')
             plt.colorbar()
@@ -219,6 +219,52 @@ class TrainLoop:
         plt.suptitle('Un-normalized Visualization (Original Scale)')
         plt.tight_layout()
         plt.savefig(f"{self.args.model_path}/plots/4_unnormalized.png")
+        plt.close()
+
+        # 5. Compute accuracy masks for each threshold
+        epsilon = 1
+        thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 2.0, 3.0, 4.0, 5.0]
+        threshold_labels = [f'{int(thresh * 100)}%' if thresh <= 1.0 else f'{int(thresh)}00%' for thresh in thresholds]
+        N, T, H_orig, W_orig = pred_unnormalized.shape
+        # For each timestep, create a grid showing where prediction matches target within threshold
+        acc_per_timestep = {label: [] for label in threshold_labels}
+        plt.figure(figsize=(160, 60))
+        for t_idx in range(T // 2, T):
+            for i, (thresh, label) in enumerate(zip(thresholds, threshold_labels)):
+                mask_within = np.abs(pred_unnormalized[C, t_idx] - target_unnormalized[C, t_idx]) <= (np.abs(target_unnormalized[C, t_idx]) * thresh + epsilon)
+                subplot_idx = (t_idx - T // 2) * len(thresholds) + i + 1
+                plt.subplot(T - T // 2, len(thresholds), subplot_idx)
+                plt.imshow(mask_within, cmap='Greens', vmin=0, vmax=1)
+                for y in range(H_orig):
+                    for x in range(W_orig):
+                        pred_val = pred_unnormalized[C, t_idx, y, x]
+                        target_val = target_unnormalized[C, t_idx, y, x]
+                        plt.text(x, y, f'{pred_val:.1f}\n{target_val:.1f}',
+                            ha='center', va='center', fontsize=6,
+                            color='black' if mask_within[y, x] else 'gray',
+                            bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.1'))
+                # Compute accuracy for this threshold and timestep
+                acc = np.sum(mask_within) / (H_orig * W_orig)
+                acc_per_timestep[label].append(acc)
+                plt.title(f'Timestep {t_idx} within {label}, accuracy {acc * 100:.2f}%')
+                plt.axis('off')
+        plt.suptitle(f'Prediction matches target within X%')
+        plt.tight_layout()
+        plt.savefig(f"{self.args.model_path}/plots/5_accuracy_within_thresholds_grid.png")
+        plt.close()
+
+        # 5. Plot accuracy within X percent for each timestep
+        plt.figure(figsize=(16, 6))
+        for label in threshold_labels:
+            plt.plot(range(T // 2, T), acc_per_timestep[label], marker='o', label=f'Within {label}')
+        plt.xlabel('Timestep')
+        plt.ylabel('Accuracy (fraction within threshold)')
+        plt.title('Accuracy within X% per Timestep')
+        plt.ylim(0, 1)
+        plt.legend()
+        plt.grid()
+        plt.tight_layout()
+        plt.savefig(f"{self.args.model_path}/plots/5_accuracy_within_thresholds.png")
         plt.close()
 
         # Save json files
@@ -265,12 +311,16 @@ class TrainLoop:
 
     def Sample(self, test_data, step, mask_ratio, mask_strategy, seed=None, dataset='', index=0, Type='val'):
         
+        print(f"Sample, Type {Type}, dataset {dataset}, mask_strategy {mask_strategy}, mask_ratio {mask_ratio}, index {index}")
         with torch.no_grad():
             all_predictions = []
 
             error_mae, error_norm, error, num, error2, num2 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-            
-            for _, batch in enumerate(test_data[index]):
+            thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 2.0, 3.0, 4.0, 5.0]
+            acc_within = {thresh: 0 for thresh in thresholds}
+            acc_total = 0
+
+            for idx, batch in enumerate(test_data[index]):
                 
                 loss, _, pred, target, mask, ids_restore, input_size = self.model_forward(batch, self.model, mask_ratio, mask_strategy, seed=seed, data = dataset, mode='forward')
 
@@ -283,8 +333,18 @@ class TrainLoop:
                 pred_mask = pred.squeeze(dim=2)
                 target_mask = target.squeeze(dim=2)
 
-                error += mean_squared_error(self.args.scaler[dataset].inverse_transform(pred_mask[mask==1].reshape(-1,1).detach().cpu().numpy()), self.args.scaler[dataset].inverse_transform(target_mask[mask==1].reshape(-1,1).detach().cpu().numpy()), squared=True) * mask.sum().item()
-                error_mae += mean_absolute_error(self.args.scaler[dataset].inverse_transform(pred_mask[mask==1].reshape(-1,1).detach().cpu().numpy()), self.args.scaler[dataset].inverse_transform(target_mask[mask==1].reshape(-1,1).detach().cpu().numpy())) * mask.sum().item()
+                # Inverse transform to original scale
+                pred_vals = self.args.scaler[dataset].inverse_transform(pred_mask[mask==1].reshape(-1,1).detach().cpu().numpy()).flatten()
+                target_vals = self.args.scaler[dataset].inverse_transform(target_mask[mask==1].reshape(-1,1).detach().cpu().numpy()).flatten()
+
+                epsilon = 1
+                for thresh in thresholds:
+                    within = np.abs(pred_vals - target_vals) <= (np.abs(target_vals) * thresh + epsilon)
+                    acc_within[thresh] += np.sum(within)
+                acc_total += len(target_vals)
+
+                error += mean_squared_error(pred_vals, target_vals, squared=True) * mask.sum().item()
+                error_mae += mean_absolute_error(pred_vals, target_vals) * mask.sum().item()
                 error_norm += loss.item() * mask.sum().item()
                 num += mask.sum().item()
                 num2 += (1-mask).sum().item()
@@ -292,8 +352,30 @@ class TrainLoop:
         rmse = np.sqrt(error / num)
         mae = error_mae / num
         loss_test = error_norm / num
+        accuracy_metrics = {thresh: (acc_within[thresh] / acc_total if acc_total > 0 else 0.0) for thresh in thresholds}
 
-        return rmse, mae, loss_test
+        print(f"Dataset: {dataset}")
+        print(f"Index: {index}")
+        print(f"Step: {step}")
+        print(f"Seed: {seed}")
+        print(f"Type: {Type}")
+        print(f"Batch: {len(batch)}")
+        print(f"Predictions: {pred_vals.shape}")
+        print(f"Targets: {target_vals.shape}")
+        print(f"All Predictions: {len(all_predictions)}")
+        print(f"Mask Strategy: {mask_strategy}")
+        print(f"Mask Ratio: {mask_ratio}")
+
+        print(f"Accuracy within thresholds:")
+        for thresh in thresholds:
+            print(f"  {int(thresh*100)}%: {accuracy_metrics[thresh]:.4f}")
+        print(f"RMSE: {rmse:.4f}")
+        print(f"MAE: {mae:.4f}")
+        print(f"Loss: {loss_test:.4f}")
+        print(f"Num: {num:.4f}")
+        print(f"Num2: {num2:.4f}")        
+
+        return rmse, mae, loss_test, accuracy_metrics
 
 
     def Evaluation(self, test_data, epoch, seed=None, best=True, Type='val'):
@@ -310,7 +392,7 @@ class TrainLoop:
             if self.args.mask_strategy_random != 'none':
                 for s in self.mask_list:
                     for m in self.mask_list[s]:
-                        result, mae, loss_test = self.Sample(test_data, epoch, mask_ratio=m, mask_strategy = s, seed=seed, dataset = dataset_name, index=index, Type=Type)
+                        result, mae, loss_test, accuracy_metrics = self.Sample(test_data, epoch, mask_ratio=m, mask_strategy = s, seed=seed, dataset = dataset_name, index=index, Type=Type)
                         rmse_list.append(result)
                         loss_list.append(loss_test)
                         if s not in rmse_key_result[dataset_name]:
@@ -326,7 +408,7 @@ class TrainLoop:
             else:
                 s = self.args.mask_strategy
                 m = self.args.mask_ratio
-                result, mae,  loss_test = self.Sample(test_data, epoch, mask_ratio=m, mask_strategy = s, seed=seed, dataset = dataset_name, index=index, Type=Type)
+                result, mae,  loss_test, accuracy_metrics = self.Sample(test_data, epoch, mask_ratio=m, mask_strategy = s, seed=seed, dataset = dataset_name, index=index, Type=Type)
                 rmse_list.append(result)
                 loss_list.append(loss_test)
                 if s not in rmse_key_result[dataset_name]:
@@ -339,7 +421,6 @@ class TrainLoop:
                     self.writer.add_scalar('Test_RMSE/Stage-{}-{}-{}-{}'.format(self.args.stage, dataset_name.split('_C')[0], s, m), result, epoch)
                     self.writer.add_scalar('Test_MAE/Stage-MAE-{}-{}-{}-{}'.format(self.args.stage, dataset_name.split('_C')[0], s, m), mae, epoch)
                     
-        
         loss_test = np.mean(loss_list)
 
         if best:
@@ -393,7 +474,8 @@ class TrainLoop:
         step = 0
 
         if self.args.mode == 'testing':
-            self.Evaluation(self.val_data, 0, best=True, Type='val')
+            print('Testing')
+            self.Evaluation(self.val_data, 0, best=True, Type='test')
             exit()
         
         self.Evaluation(self.val_data, 0, best=True, Type='val')
