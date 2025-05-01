@@ -64,9 +64,22 @@ def data_load_single(args, dataset):
         T: Time steps
         H, W: Height and width
     """
-    X_train = torch.tensor(data_all['X_train'][0]).unsqueeze(1)
-    X_test = torch.tensor(data_all['X_test'][0]).unsqueeze(1)
-    X_val = torch.tensor(data_all['X_val'][0]).unsqueeze(1)
+    X_train = torch.tensor(data_all['X_train'][0])
+    X_test = torch.tensor(data_all['X_test'][0])
+    X_val = torch.tensor(data_all['X_val'][0])
+    if X_train.ndim == X_test.ndim == X_val.ndim == 4:
+        X_train = X_train.unsqueeze(1)
+        X_test = X_test.unsqueeze(1)
+        X_val = X_val.unsqueeze(1)
+    elif X_train.ndim == X_test.ndim == X_val.ndim == 5:
+        X_train = X_train.permute(0, 2, 1, 3, 4)
+        X_test = X_test.permute(0, 2, 1, 3, 4)
+        X_val = X_val.permute(0, 2, 1, 3, 4)
+    else:
+        raise ValueError(f"Input data should be 4D or 5D tensor, X_train {X_train.ndim}, X_test {X_test.ndim}, X_val {X_val.ndim}")
+    print("data_load_single X_train shape:", X_train.shape)
+    print("data_load_single X_test shape:", X_test.shape)
+    print("data_load_single X_val shape:", X_val.shape)
 
     # Load periodic data and rearrange dimensions
     """

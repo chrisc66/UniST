@@ -324,9 +324,9 @@ class TrainLoop:
                 
                 loss, _, pred, target, mask, ids_restore, input_size = self.model_forward(batch, self.model, mask_ratio, mask_strategy, seed=seed, data = dataset, mode='forward')
 
-                # Extract both masked and unmasked predictions
-                results = self.extract_predictions(pred, target, mask, input_size, dataset)
-                all_predictions.append(results)
+                # # Extract both masked and unmasked predictions
+                # results = self.extract_predictions(pred, target, mask, input_size, dataset)
+                # all_predictions.append(results)
 
                 pred = torch.clamp(pred, min=-1, max=1)
 
@@ -352,28 +352,29 @@ class TrainLoop:
         rmse = np.sqrt(error / num)
         mae = error_mae / num
         loss_test = error_norm / num
-        accuracy_metrics = {thresh: (acc_within[thresh] / acc_total if acc_total > 0 else 0.0) for thresh in thresholds}
+        accuracy_metrics = 0
+        # accuracy_metrics = {thresh: (acc_within[thresh] / acc_total if acc_total > 0 else 0.0) for thresh in thresholds}
 
-        print(f"Dataset: {dataset}")
-        print(f"Index: {index}")
-        print(f"Step: {step}")
-        print(f"Seed: {seed}")
-        print(f"Type: {Type}")
-        print(f"Batch: {len(batch)}")
-        print(f"Predictions: {pred_vals.shape}")
-        print(f"Targets: {target_vals.shape}")
-        print(f"All Predictions: {len(all_predictions)}")
-        print(f"Mask Strategy: {mask_strategy}")
-        print(f"Mask Ratio: {mask_ratio}")
+        # print(f"Dataset: {dataset}")
+        # print(f"Index: {index}")
+        # print(f"Step: {step}")
+        # print(f"Seed: {seed}")
+        # print(f"Type: {Type}")
+        # print(f"Batch: {len(batch)}")
+        # print(f"Predictions: {pred_vals.shape}")
+        # print(f"Targets: {target_vals.shape}")
+        # print(f"All Predictions: {len(all_predictions)}")
+        # print(f"Mask Strategy: {mask_strategy}")
+        # print(f"Mask Ratio: {mask_ratio}")
 
-        print(f"Accuracy within thresholds:")
-        for thresh in thresholds:
-            print(f"  {int(thresh*100)}%: {accuracy_metrics[thresh]:.4f}")
-        print(f"RMSE: {rmse:.4f}")
-        print(f"MAE: {mae:.4f}")
-        print(f"Loss: {loss_test:.4f}")
-        print(f"Num: {num:.4f}")
-        print(f"Num2: {num2:.4f}")        
+        # print(f"Prediction Acceptance Rate at X Percent:")
+        # for thresh in thresholds:
+        #     print(f"  {int(thresh*100)}%: {accuracy_metrics[thresh]:.4f}")
+        # print(f"RMSE: {rmse:.4f}")
+        # print(f"MAE: {mae:.4f}")
+        # print(f"Loss: {loss_test:.4f}")
+        # print(f"Num: {num:.4f}")
+        # print(f"Num2: {num2:.4f}")
 
         return rmse, mae, loss_test, accuracy_metrics
 

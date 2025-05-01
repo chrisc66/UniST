@@ -526,7 +526,7 @@ class UniST(nn.Module):
         h = H // p
         w = W // p
         t = T // u
-        # print(f"Patchify: N={N}, T={T}, H={H}, W={W}, p={p}, u={u}, t={t}, h={h}, w={w}")
+        print(f"Patchify: shape {imgs.shape}, N={N}, T={T}, H={H}, W={W}, p={p}, u={u}, t={t}, h={h}, w={w}")
         x = imgs.reshape(shape=(N, 1, t, u, h, p, w, p))
         x = torch.einsum("nctuhpwq->nthwupqc", x)
         x = x.reshape(shape=(N, t * h * w, u * p**2 * 1))
