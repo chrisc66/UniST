@@ -58,6 +58,7 @@ class TrainLoop:
         T, H, W = input_size
         p = self.model.args.patch_size
         u = self.model.args.t_patch_size
+        C = 2
 
         T = T * 2       # double sequence length (hist == prediction)
         t = T // u      # temporal patches
@@ -73,12 +74,16 @@ class TrainLoop:
         pred_masked = pred[mask_expanded==1]
         target_masked = target[mask_expanded==1]
 
-        # Unpatch data
-        pred_patched = copy.deepcopy(pred).reshape(N, t * h * w, u * p * p)
-        target_patched = copy.deepcopy(target).reshape(N, t * h * w, u * p * p)
+        # Calculate correct reshape dimensions based on total elements
+        total_elements = pred.numel()
+        expected_last_dim = total_elements // (N * t * h * w)
 
-        pred_unpatched = self.model.unpatchify(pred_patched).reshape(N, T, H_orig, W_orig)
-        target_unpatched = self.model.unpatchify(target_patched).reshape(N, T, H_orig, W_orig)
+        # Unpatch data - use the calculated dimension based on total elements
+        pred_patched = copy.deepcopy(pred).reshape(N, t * h * w, expected_last_dim)
+        target_patched = copy.deepcopy(target).reshape(N, t * h * w, expected_last_dim)
+
+        pred_unpatched = self.model.unpatchify(pred_patched)  # Shape: (N, C, T, H_orig, W_orig)
+        target_unpatched = self.model.unpatchify(target_patched)  # Shape: (N, C, T, H_orig, W_orig)
 
         # Un-normalize data original scale
         pred_numpy = pred_unpatched.detach().cpu().numpy()
@@ -168,25 +173,29 @@ class TrainLoop:
         plt.close()
 
         # 3 Unpatched Data
+        batch_idx = 0    # Index for selecting batch element
+        channel_idx = 0  # Index for selecting channel (0 or 1 since you have C=2)
+
         plt.figure(figsize=(50, 10))
         timesteps = range(0, T)
         for i, t_idx in enumerate(timesteps):
             plt.subplot(3, len(timesteps), i + 1)
-            plt.imshow(target_unpatched[C, t_idx].detach().cpu().numpy(), vmin=-1, vmax=1)
+            plt.imshow(target_unpatched[batch_idx, channel_idx, t_idx].detach().cpu().numpy(), vmin=-1, vmax=1)
             plt.gca().invert_xaxis()
-            plt.title(f'Target t={t_idx}')
+            plt.title(f'Target t={t_idx}, ch={channel_idx}')
             plt.colorbar()
 
             plt.subplot(3, len(timesteps), i + 1 + len(timesteps))
-            plt.imshow(pred_unpatched[C, t_idx].detach().cpu().numpy(), vmin=-1, vmax=1)
+            plt.imshow(pred_unpatched[batch_idx, channel_idx, t_idx].detach().cpu().numpy(), vmin=-1, vmax=1)
             plt.gca().invert_xaxis()
-            plt.title(f'Prediction t={t_idx}')
+            plt.title(f'Prediction t={t_idx}, ch={channel_idx}')
             plt.colorbar()
 
             plt.subplot(3, len(timesteps), i + 1 + 2 * len(timesteps))
-            plt.imshow(np.abs(pred_unpatched[C, t_idx].detach().cpu().numpy() - target_unpatched[C, t_idx].detach().cpu().numpy()), vmin=-1, vmax=1)
+            plt.imshow(np.abs(pred_unpatched[batch_idx, channel_idx, t_idx].detach().cpu().numpy() - 
+                            target_unpatched[batch_idx, channel_idx, t_idx].detach().cpu().numpy()), vmin=-1, vmax=1)
             plt.gca().invert_xaxis()
-            plt.title(f'Absolute Error t={t_idx}')
+            plt.title(f'Absolute Error t={t_idx}, ch={channel_idx}')
             plt.colorbar()
 
         plt.suptitle('Unpatched Visualization')
@@ -199,21 +208,21 @@ class TrainLoop:
         timesteps = range(0, T)
         for i, t_idx in enumerate(timesteps):
             plt.subplot(3, len(timesteps), i + 1)
-            plt.imshow(target_unnormalized[C, t_idx], vmin=0, vmax=22)
+            plt.imshow(target_unnormalized[batch_idx, channel_idx, t_idx], vmin=0, vmax=22)
             plt.gca().invert_xaxis()
-            plt.title(f'Target t={t_idx}')
+            plt.title(f'Target t={t_idx}, ch={channel_idx}')
             plt.colorbar()
 
             plt.subplot(3, len(timesteps), i + 1 + len(timesteps))
-            plt.imshow(pred_unnormalized[C, t_idx], vmin=0, vmax=22)
+            plt.imshow(pred_unnormalized[batch_idx, channel_idx, t_idx], vmin=0, vmax=22)
             plt.gca().invert_xaxis()
-            plt.title(f'Prediction t={t_idx}')
+            plt.title(f'Prediction t={t_idx}, ch={channel_idx}')
             plt.colorbar()
 
             plt.subplot(3, len(timesteps), i + 1 + 2 * len(timesteps))
-            plt.imshow(np.abs(pred_unnormalized[C, t_idx] - target_unnormalized[C, t_idx]), vmin=0, vmax=22)
+            plt.imshow(np.abs(pred_unnormalized[batch_idx, channel_idx, t_idx] - target_unnormalized[batch_idx, channel_idx, t_idx]), vmin=0, vmax=22)
             plt.gca().invert_xaxis()
-            plt.title(f'Absolute Error t={t_idx}')
+            plt.title(f'Absolute Error t={t_idx}, ch={channel_idx}')
             plt.colorbar()
 
         plt.suptitle('Un-normalized Visualization (Original Scale)')
@@ -225,20 +234,20 @@ class TrainLoop:
         epsilon = 1
         thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 2.0, 3.0, 4.0, 5.0]
         threshold_labels = [f'{int(thresh * 100)}%' if thresh <= 1.0 else f'{int(thresh)}00%' for thresh in thresholds]
-        N, T, H_orig, W_orig = pred_unnormalized.shape
+        N, _, T, H_orig, W_orig = pred_unnormalized.shape # shape N, C, T, H, W
         # For each timestep, create a grid showing where prediction matches target within threshold
         acc_per_timestep = {label: [] for label in threshold_labels}
         plt.figure(figsize=(160, 60))
         for t_idx in range(T // 2, T):
             for i, (thresh, label) in enumerate(zip(thresholds, threshold_labels)):
-                mask_within = np.abs(pred_unnormalized[C, t_idx] - target_unnormalized[C, t_idx]) <= (np.abs(target_unnormalized[C, t_idx]) * thresh + epsilon)
+                mask_within = np.abs(pred_unnormalized[batch_idx, channel_idx, t_idx] - target_unnormalized[batch_idx, channel_idx, t_idx]) <= (np.abs(target_unnormalized[batch_idx, channel_idx, t_idx]) * thresh + epsilon)
                 subplot_idx = (t_idx - T // 2) * len(thresholds) + i + 1
                 plt.subplot(T - T // 2, len(thresholds), subplot_idx)
                 plt.imshow(mask_within, cmap='Greens', vmin=0, vmax=1)
                 for y in range(H_orig):
                     for x in range(W_orig):
-                        pred_val = pred_unnormalized[C, t_idx, y, x]
-                        target_val = target_unnormalized[C, t_idx, y, x]
+                        pred_val = pred_unnormalized[batch_idx, channel_idx, t_idx, y, x]
+                        target_val = target_unnormalized[batch_idx, channel_idx, t_idx, y, x]
                         plt.text(x, y, f'{pred_val:.1f}\n{target_val:.1f}',
                             ha='center', va='center', fontsize=6,
                             color='black' if mask_within[y, x] else 'gray',

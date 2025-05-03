@@ -31,6 +31,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6), # Normalization layer
             pos_emb = args.pos_emb, # Position embedding type from args
             no_qkv_bias = args.no_qkv_bias, # Whether to use bias in QKV transformation
+            in_chans = 2, # Number of input channels (original feature + population)
             args = args, # Pass the entire args object to the model
             **kwargs, # Additional keyword arguments
         )
@@ -50,6 +51,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
+            in_chans = 2, # Number of input channels (original feature + population)
             args = args,
             **kwargs,
         )
@@ -69,6 +71,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
+            in_chans = 2, # Number of input channels (original feature + population)
             args = args,
             **kwargs,
         )
@@ -88,6 +91,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
+            in_chans = 2, # Number of input channels (original feature + population)
             args = args,
             **kwargs,
         )
@@ -107,6 +111,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
+            in_chans = 2, # Number of input channels (original feature + population)
             args = args,
             **kwargs,
         )
@@ -126,6 +131,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
+            in_chans = 2, # Number of input channels (original feature + population)
             args = args,
             **kwargs,
         )
@@ -145,6 +151,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
+            in_chans = 2, # Number of input channels (original feature + population)
             args = args,
             **kwargs,
         )
@@ -164,6 +171,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = bool(args.no_qkv_bias),
+            in_chans = 2, # Number of input channels (original feature + population)
             args = args,
             **kwargs,
         )
@@ -183,6 +191,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = bool(args.no_qkv_bias),
+            in_chans = 2, # Number of input channels (original feature + population)
             args = args,
             **kwargs,
         )
@@ -348,7 +357,7 @@ class Block(nn.Module):
 class UniST(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
     """
-    def __init__(self, patch_size=1, in_chans=1,
+    def __init__(self, patch_size=1, in_chans=2,
                  embed_dim=512, decoder_embed_dim=512, depth=12, decoder_depth=8, num_heads=8,  decoder_num_heads=4,
                  mlp_ratio=2, norm_layer=nn.LayerNorm, t_patch_size=1,
                  no_qkv_bias=False, pos_emb = 'trivial', args=None, ):
@@ -358,10 +367,10 @@ class UniST(nn.Module):
 
         self.pos_emb = pos_emb
 
-        self.Embedding = DataEmbedding(1, embed_dim, args=args, size1=53, size2=11)
+        self.Embedding = DataEmbedding(in_chans, embed_dim, args=args, size1=53, size2=11)
 
         #if 'TDrive' in args.dataset or 'BikeNYC2' in args.dataset:
-        self.Embedding_24 = DataEmbedding(1, embed_dim, args=args, size1=53, size2=11)
+        self.Embedding_24 = DataEmbedding(in_chans, embed_dim, args=args, size1=53, size2=11)
 
         if args.prompt_ST != 0:
             self.st_prompt = Prompt_ST(args.num_memory_spatial, args.num_memory_temporal, embed_dim, self.args.his_len, args.conv_num, args=args)
@@ -519,17 +528,17 @@ class UniST(nn.Module):
         imgs: (N, 1, T, H, W)
         x: (N, L, patch_size**2 *1)
         """
-        N, _, T, H, W = imgs.shape
+        N, C, T, H, W = imgs.shape
         p = self.args.patch_size
         u = self.args.t_patch_size
         assert H % p == 0 and W % p == 0 and T % u == 0
         h = H // p
         w = W // p
         t = T // u
-        print(f"Patchify: shape {imgs.shape}, N={N}, T={T}, H={H}, W={W}, p={p}, u={u}, t={t}, h={h}, w={w}")
-        x = imgs.reshape(shape=(N, 1, t, u, h, p, w, p))
+        # print(f"Patchify: shape {imgs.shape}, N={N}, T={T}, H={H}, W={W}, p={p}, u={u}, t={t}, h={h}, w={w}")
+        x = imgs.reshape(shape=(N, C, t, u, h, p, w, p))
         x = torch.einsum("nctuhpwq->nthwupqc", x)
-        x = x.reshape(shape=(N, t * h * w, u * p**2 * 1))
+        x = x.reshape(shape=(N, t * h * w, u * p**2 * C))
         self.patch_info = (N, T, H, W, p, u, t, h, w)
         return x
 
@@ -540,10 +549,11 @@ class UniST(nn.Module):
         imgs: (N, L, patch_size**2 * t_patch_size)
         Returns: (N, T, H, W)
         """
+        C = 2
         N, T, H, W, p, u, t, h, w = self.patch_info
-        imgs = imgs.reshape(N, t, h, w, u, p, p)
-        imgs = torch.einsum("nthwupq->ntuhpwq", imgs)
-        imgs = imgs.reshape(N, T, h * p, w * p)
+        imgs = imgs.reshape(N, t, h, w, u, p, p, C)
+        imgs = torch.einsum("nthwupqc->nctuhpwq", imgs)
+        imgs = imgs.reshape(N, C, T, h * p, w * p)
         return imgs
 
 
@@ -614,19 +624,34 @@ class UniST(nn.Module):
 
         HW = x_closeness.shape[2]
 
-        x_period = x_period.unsqueeze(2).reshape(-1,1,x_period.shape[-3],x_period.shape[-2],x_period.shape[-1]) 
+        # x_period = x_period.unsqueeze(2).reshape(-1,1,x_period.shape[-3],x_period.shape[-2],x_period.shape[-1])
+        # x_closeness = x_closeness.permute(0,2,1,3).reshape(-1, x_closeness.shape[1], x_closeness.shape[-1])
 
-        x_closeness = x_closeness.permute(0,2,1,3).reshape(-1, x_closeness.shape[1], x_closeness.shape[-1]) 
+        N_p, P, T_step, H_p, W_p = x_period.shape
+        C = self.in_chans # Should be 2
+        N = shape[0] # Get N from the shape passed to prompt_generate (likely batch size of main input x = 112)
+
+        # Reshape x_period to (N*P, 1, T_step, H, W) and repeat channel dim to C=2
+        x_period = x_period.reshape(N_p * P, 1, T_step, H_p, W_p) # (336, 1, 6, 8, 8)
+        x_period = x_period.repeat(1, C, 1, 1, 1) # (336, 2, 6, 8, 8)
+
+        # Reshape x_closeness for temporal_prompt input
+        x_closeness_for_prompt = x_closeness.permute(0,2,1,3).reshape(-1, x_closeness.shape[1], x_closeness.shape[-1])
 
         if 'TDrive' in data or 'BikeNYC2' in data:
-            x_period = self.Embedding_24.value_embedding(x_period).reshape(shape[0], P, -1, self.embed_dim)
+            x_period = self.Embedding_24.value_embedding(x_period).reshape(N, P, -1, self.embed_dim)
            
         else:
-            x_period = self.Embedding.value_embedding(x_period).reshape(shape[0], P, -1, self.embed_dim)
+            x_period = self.Embedding.value_embedding(x_period).reshape(N, P, -1, self.embed_dim)
 
-        x_period = x_period.permute(0,2,1,3).reshape(-1,x_period.shape[1],x_period.shape[-1])
+        # x_period = x_period.permute(0,2,1,3).reshape(-1,x_period.shape[1],x_period.shape[-1])
+        Seq_out = 48
+        x_period = x_period.reshape(N, P, Seq_out, self.embed_dim) # (N, P, Seq_out, embed_dim)
+        x_period_for_prompt = x_period.permute(0, 2, 1, 3) # (N, Seq_out, P, embed_dim)
+        x_period_for_prompt = x_period_for_prompt.reshape(N * Seq_out, P, self.embed_dim) # (N*Seq_out, P, embed_dim)
 
-        prompt_t = self.st_prompt.temporal_prompt(x_closeness, x_period)
+        # prompt_t = self.st_prompt.temporal_prompt(x_closeness, x_period)
+        prompt_t = self.st_prompt.temporal_prompt(x_closeness_for_prompt, x_period_for_prompt)
 
         prompt_c = prompt_t['hc'].reshape(shape[0], -1, prompt_t['hc'].shape[-1])
         prompt_p = prompt_t['hp'].reshape(shape[0], -1, prompt_t['hp'].shape[-1]) 
@@ -640,7 +665,16 @@ class UniST(nn.Module):
 
         t_loss = prompt_t['loss']
 
-        out_s = self.st_prompt.spatial_prompt(x)
+        # # Option 1: Replicate each channel 3 times to get 6 channels
+        # x_spatial = x[:, :, -1, :, :]  # Shape: [112, 2, 8, 8]
+        # x_spatial = x_spatial.repeat(1, 3, 1, 1)  # Shape: [112, 6, 8, 8]
+
+        # Option 2 (alternative): Use the temporal dimension to create channels
+        x_spatial = x.permute(0, 2, 1, 3, 4)  # [112, 6, 2, 8, 8]
+        x_spatial = x_spatial.reshape(x.shape[0], x.shape[2]*x.shape[1], x.shape[3], x.shape[4])  # [112, 12, 8, 8]
+        x_spatial = x_spatial[:, :6, :, :]  # Take first 6 channels
+
+        out_s = self.st_prompt.spatial_prompt(x_spatial)
 
         out_s, s_loss = out_s['out'], out_s['loss']
         out_s = [self.spatial_patch(i).unsqueeze(dim=1).repeat(1,self.args.pred_len//self.args.t_patch_size,1,1).reshape(i.shape[0],-1,self.embed_dim).unsqueeze(dim=0) for i in out_s]
