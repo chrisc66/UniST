@@ -319,8 +319,26 @@ class TrainLoop:
 
 
     def Sample(self, test_data, step, mask_ratio, mask_strategy, seed=None, dataset='', index=0, Type='val'):
-        
         print(f"Sample, Type {Type}, dataset {dataset}, mask_strategy {mask_strategy}, mask_ratio {mask_ratio}, index {index}")
+        
+        # Debug print for input data shape
+        print("\n=== Input Data Shape ===")
+        print(f"Expected input shape: [batch, channels, time, height, width]")
+        # Get first batch from DataLoader
+        for batch in test_data[index]:
+            print(f"Actual input shape: {[t.shape for t in batch]}")
+            break
+        
+        self.model.eval()
+        error = 0
+        error_mae = 0
+        error_norm = 0
+        num = 0
+        num2 = 0
+        acc_within = {0.1: 0, 0.2: 0, 0.3: 0}
+        acc_total = 0
+        thresholds = [0.1, 0.2, 0.3]
+
         with torch.no_grad():
             all_predictions = []
 
@@ -330,8 +348,19 @@ class TrainLoop:
             acc_total = 0
 
             for idx, batch in enumerate(test_data[index]):
+                # Debug print for batch shapes
+                print(f"\n=== Batch {idx} Shapes ===")
+                print(f"Batch tensors shapes: {[t.shape for t in batch]}")
                 
                 loss, _, pred, target, mask, ids_restore, input_size = self.model_forward(batch, self.model, mask_ratio, mask_strategy, seed=seed, data = dataset, mode='forward')
+
+                # Debug print for model output shapes
+                print("\n=== Model Output Shapes ===")
+                print(f"pred shape: {pred.shape}")
+                print(f"target shape: {target.shape}")
+                print(f"mask shape: {mask.shape}")
+                print(f"ids_restore shape: {ids_restore.shape}")
+                print(f"input_size: {input_size}")
 
                 # # Extract both masked and unmasked predictions
                 # results = self.extract_predictions(pred, target, mask, input_size, dataset)
@@ -342,9 +371,41 @@ class TrainLoop:
                 pred_mask = pred.squeeze(dim=2)
                 target_mask = target.squeeze(dim=2)
 
+                # Debug print for masked tensors
+                print("\n=== Masked Tensor Shapes ===")
+                print(f"pred_mask shape: {pred_mask.shape}")
+                print(f"target_mask shape: {target_mask.shape}")
+                print(f"mask shape: {mask.shape}")
+
+                # Process each feature separately
+                print("\n=== Feature Processing ===")
+                for feature_idx in range(pred_mask.shape[-1]):
+                    print(f"\nProcessing feature {feature_idx}:")
+                    pred_feature = pred_mask[..., feature_idx]
+                    target_feature = target_mask[..., feature_idx]
+                    
+                    print(f"Feature {feature_idx} shapes:")
+                    print(f"pred_feature shape: {pred_feature.shape}")
+                    print(f"target_feature shape: {target_feature.shape}")
+                    
+                    # Inverse transform to original scale for this feature
+                    pred_vals = self.args.scaler[dataset].inverse_transform(pred_feature[mask==1].reshape(-1,1).detach().cpu().numpy()).flatten()
+                    target_vals = self.args.scaler[dataset].inverse_transform(target_feature[mask==1].reshape(-1,1).detach().cpu().numpy()).flatten()
+                    
+                    print(f"Feature {feature_idx} final values:")
+                    print(f"pred_vals shape: {pred_vals.shape}")
+                    print(f"target_vals shape: {target_vals.shape}")
+                    print(f"RMSE for feature {feature_idx}: {np.sqrt(mean_squared_error(pred_vals, target_vals, squared=True)):.4f}")
+                    print(f"MAE for feature {feature_idx}: {mean_absolute_error(pred_vals, target_vals):.4f}")
+
                 # Inverse transform to original scale
                 pred_vals = self.args.scaler[dataset].inverse_transform(pred_mask[mask==1].reshape(-1,1).detach().cpu().numpy()).flatten()
                 target_vals = self.args.scaler[dataset].inverse_transform(target_mask[mask==1].reshape(-1,1).detach().cpu().numpy()).flatten()
+
+                # Debug print for final values
+                print("\n=== Final Value Shapes ===")
+                print(f"pred_vals shape: {pred_vals.shape}")
+                print(f"target_vals shape: {target_vals.shape}")
 
                 epsilon = 1
                 for thresh in thresholds:
