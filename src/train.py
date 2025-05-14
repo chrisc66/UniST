@@ -44,407 +44,363 @@ class TrainLoop:
         return loss, num, loss_real, num2
 
 
-    def extract_predictions(self, pred, target, mask, input_size, dataset_name):
+    def extract_predictions(self, pred, target, mask, input_size, dataset_name, plot=False):
         """
         Extract both masked and unmasked predictions
         Args:
-            pred: model predictions [N, L, patch_size**2 * t_patch_size]
-            target: ground truth [N, L, patch_size**2 * t_patch_size]
+            pred: model predictions [N, L, patch_size**2 * t_patch_size * C_model]
+            target: ground truth [N, L, patch_size**2 * t_patch_size * C_model]
             mask: masking tensor [N, L]
-            input_size: tuple of (T, H, W) for reshaping
+            input_size: tuple of (T_patch, H_patch, W_patch) for reshaping, where T_patch is T // t_patch_size etc.
             dataset_name: name of dataset for scaler
         """
         N = pred.shape[0]
-        T, H, W = input_size
+        T_patch, H_patch, W_patch = input_size # These are patch counts, not original dimensions
         p = self.model.args.patch_size
         u = self.model.args.t_patch_size
-        C = 2
+        C_model = self.model.in_chans # Number of channels from the model
 
-        T = T * 2       # double sequence length (hist == prediction)
-        t = T // u      # temporal patches
-        h = H           # height patches (already divided in forward_encoder)
-        w = W           # width patches (already divided in forward_encoder)
-        H_orig = H * p  # Convert back to pixel dimensions
-        W_orig = W * p  # Convert back to pixel dimensions
+        # Original dimensions before patching
+        T_orig = T_patch * u
+        H_orig = H_patch * p
+        W_orig = W_patch * p
 
-        self.model.patch_info = (N, T, H_orig, W_orig, p, u, t, h, w)
+        # Update patch_info with correct original and patch dimensions
+        # N, T_orig, H_orig, W_orig, p_spatial, u_temporal, t_patch_count, h_patch_count, w_patch_count
+        self.model.patch_info = (N, T_orig, H_orig, W_orig, p, u, T_patch, H_patch, W_patch)
 
-        # Masked data
-        mask_expanded = mask.unsqueeze(-1).expand(-1, -1, pred.shape[-1])
-        pred_masked = pred[mask_expanded==1]
-        target_masked = target[mask_expanded==1]
+        # Masked data (still in patched domain, normalized)
+        # pred/target are [N, L, D_patch_full], mask is [N, L]
+        mask_expanded = mask.unsqueeze(-1).expand_as(pred) # Expand mask to match pred/target dimensions
+        pred_masked = pred[mask_expanded == 1] # Flattened masked predictions
+        target_masked = target[mask_expanded == 1] # Flattened masked targets
 
-        # Calculate correct reshape dimensions based on total elements
-        total_elements = pred.numel()
-        expected_last_dim = total_elements // (N * t * h * w)
+        # Unpatch data to [N, C, T_orig, H_orig, W_orig]
+        # The unpatchify method in the model should handle the C_model dimension correctly.
+        pred_unpatched = self.model.unpatchify(pred)      # Shape: (N, C_model, T_orig, H_orig, W_orig)
+        target_unpatched = self.model.unpatchify(target)  # Shape: (N, C_model, T_orig, H_orig, W_orig)
 
-        # Unpatch data - use the calculated dimension based on total elements
-        pred_patched = copy.deepcopy(pred).reshape(N, t * h * w, expected_last_dim)
-        target_patched = copy.deepcopy(target).reshape(N, t * h * w, expected_last_dim)
+        # Un-normalize data to original scale using the per-channel scaler
+        # The scaler expects torch.Tensor of shape [N, C, T, H, W]
+        pred_unnormalized_tensor = self.args.scaler[dataset_name].inverse_transform(pred_unpatched.detach().cpu())
+        target_unnormalized_tensor = self.args.scaler[dataset_name].inverse_transform(target_unpatched.detach().cpu())
 
-        pred_unpatched = self.model.unpatchify(pred_patched)  # Shape: (N, C, T, H_orig, W_orig)
-        target_unpatched = self.model.unpatchify(target_patched)  # Shape: (N, C, T, H_orig, W_orig)
+        pred_unnormalized = pred_unnormalized_tensor.numpy()
+        target_unnormalized = target_unnormalized_tensor.numpy()
+        
+        # Convert normalized unpatched data to numpy for consistency in return dict
+        pred_numpy_normalized_unpatched = pred_unpatched.detach().cpu().numpy()
+        target_numpy_normalized_unpatched = target_unpatched.detach().cpu().numpy()
 
-        # Un-normalize data original scale
-        pred_numpy = pred_unpatched.detach().cpu().numpy()
-        target_numpy = target_unpatched.detach().cpu().numpy()
+        if plot:
+            os.makedirs(f"{self.args.model_path}/plots", exist_ok=True)
 
-        pred_unnormalized = self.args.scaler[dataset_name].inverse_transform(pred_numpy.reshape(-1, 1)).reshape(pred_numpy.shape)
-        target_unnormalized = self.args.scaler[dataset_name].inverse_transform(target_numpy.reshape(-1, 1)).reshape(target_numpy.shape)
+            # 1. Masked Data (Plotting flattened masked values, might be very long)
+            plt.figure(figsize=(100, 30))
 
-        os.makedirs(f"{self.args.model_path}/plots", exist_ok=True)
+            plt.subplot(311)
+            plt.plot(target_masked.detach().cpu().numpy(), label='Target')
+            plt.title(f'Masked Target ({target_masked.shape})')
+            plt.legend()
+            plt.grid()
 
-        C = 0
+            plt.subplot(312)
+            plt.plot(pred_masked.detach().cpu().numpy(), label='Prediction')
+            plt.title(f'Masked Prediction ({pred_masked.shape})')
+            plt.legend()
+            plt.grid()
 
-        # 1. Masked Data
-        plt.figure(figsize=(100, 30))
+            plt.subplot(313)
+            plt.plot(np.abs(target_masked.detach().cpu().numpy() - pred_masked.detach().cpu().numpy()), label='Absolute Error')
+            plt.title('Masked Absolute Error')
+            plt.legend()
+            plt.grid()
 
-        plt.subplot(311)
-        plt.plot(target_masked.detach().cpu().numpy(), label='Target')
-        plt.title(f'Masked Target ({target_masked.shape})')
-        plt.legend()
-        plt.grid()
+            plt.suptitle('Masked Data Visualization')
+            plt.tight_layout()
+            plt.savefig(f"{self.args.model_path}/plots/1_masked.png")
+            plt.close()
 
-        plt.subplot(312)
-        plt.plot(pred_masked.detach().cpu().numpy(), label='Prediction')
-        plt.title(f'Masked Prediction ({pred_masked.shape})')
-        plt.legend()
-        plt.grid()
+            # 1. Masked Data (Partial)
+            LEN = 50
+            plt.figure(figsize=(30, 10))
 
-        plt.subplot(313)
-        plt.plot(np.abs(target_masked.detach().cpu().numpy() - pred_masked.detach().cpu().numpy()), label='Absolute Error')
-        plt.title('Masked Absolute Error')
-        plt.legend()
-        plt.grid()
+            plt.subplot(131)
+            plt.bar(range(LEN), target_masked[:LEN].detach().cpu().numpy(), label='Target')
+            plt.title(f'Masked Target ({target_masked[:LEN].shape})')
+            plt.legend()
+            plt.grid()
 
-        plt.suptitle('Masked Data Visualization')
-        plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/plots/1_masked.png")
-        plt.close()
+            plt.subplot(132)
+            plt.bar(range(LEN), pred_masked[:LEN].detach().cpu().numpy(), label='Prediction')
+            plt.title(f'Masked Prediction ({pred_masked[:LEN].shape})')
+            plt.legend()
+            plt.grid()
 
-        # 1. Masked Data (Partial)
-        LEN = 50
-        plt.figure(figsize=(30, 10))
+            plt.subplot(133)
+            plt.bar(range(LEN), np.abs(target_masked[:LEN].detach().cpu().numpy() - pred_masked[:LEN].detach().cpu().numpy()), label='Absolute Error')
+            plt.title('Masked Absolute Error')
+            plt.legend()
+            plt.grid()
 
-        plt.subplot(131)
-        plt.bar(range(LEN), target_masked[:LEN].detach().cpu().numpy(), label='Target')
-        plt.title(f'Masked Target ({target_masked[:LEN].shape})')
-        plt.legend()
-        plt.grid()
+            plt.suptitle('Masked Data Visualization')
+            plt.tight_layout()
+            plt.savefig(f"{self.args.model_path}/plots/1_masked_partial.png")
+            plt.close()
 
-        plt.subplot(132)
-        plt.bar(range(LEN), pred_masked[:LEN].detach().cpu().numpy(), label='Prediction')
-        plt.title(f'Masked Prediction ({pred_masked[:LEN].shape})')
-        plt.legend()
-        plt.grid()
+            # 2 Patched Data (Plotting one sample, all patches, all channels combined in the last dim of 'pred')
+            # pred is [N, L, D_patch_full]. We can take one sample.
+            sample_idx_plot = 0
+            plt.figure(figsize=(20, 10))
 
-        plt.subplot(133)
-        plt.bar(range(LEN), np.abs(target_masked[:LEN].detach().cpu().numpy() - pred_masked[:LEN].detach().cpu().numpy()), label='Absolute Error')
-        plt.title('Masked Absolute Error')
-        plt.legend()
-        plt.grid()
-
-        plt.suptitle('Masked Data Visualization')
-        plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/plots/1_masked_partial.png")
-        plt.close()
-
-        # 2 Patched Data
-        plt.figure(figsize=(10, 100))
-
-        plt.subplot(131)
-        plt.imshow(target_patched[C].detach().cpu().numpy(), origin='lower', vmin=-1, vmax=1)
-        plt.title(f'Target ({target_patched[C].shape})')
-        plt.colorbar()
-
-        plt.subplot(132)
-        plt.imshow(pred_patched[C].detach().cpu().numpy(), origin='lower', vmin=-1, vmax=1)
-        plt.title(f'Prediction ({pred_patched[C].shape})')
-        plt.colorbar()
-
-        plt.subplot(133)
-        plt.imshow(np.abs(target_patched[C].detach().cpu().numpy() - pred_patched[C].detach().cpu().numpy()), origin='lower', vmin=-1, vmax=1)
-        plt.title('Absolute Error')
-        plt.colorbar()
-
-        plt.suptitle('Patched Visualization')
-        plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/plots/2_patched.png")
-        plt.close()
-
-        # 3 Unpatched Data
-        batch_idx = 0    # Index for selecting batch element
-        channel_idx = 0  # Index for selecting channel (0 or 1 since you have C=2)
-
-        plt.figure(figsize=(50, 10))
-        timesteps = range(0, T)
-        for i, t_idx in enumerate(timesteps):
-            plt.subplot(3, len(timesteps), i + 1)
-            plt.imshow(target_unpatched[batch_idx, channel_idx, t_idx].detach().cpu().numpy(), vmin=-1, vmax=1)
-            plt.gca().invert_xaxis()
-            plt.title(f'Target t={t_idx}, ch={channel_idx}')
+            plt.subplot(131)
+            plt.imshow(target[sample_idx_plot].detach().cpu().numpy(), aspect='auto', origin='lower', cmap='viridis')
+            plt.title(f'Target Patched (Sample {sample_idx_plot}, Shape: {target[sample_idx_plot].shape})')
             plt.colorbar()
 
-            plt.subplot(3, len(timesteps), i + 1 + len(timesteps))
-            plt.imshow(pred_unpatched[batch_idx, channel_idx, t_idx].detach().cpu().numpy(), vmin=-1, vmax=1)
-            plt.gca().invert_xaxis()
-            plt.title(f'Prediction t={t_idx}, ch={channel_idx}')
+            plt.subplot(132)
+            plt.imshow(pred[sample_idx_plot].detach().cpu().numpy(), aspect='auto', origin='lower', cmap='viridis')
+            plt.title(f'Prediction Patched (Sample {sample_idx_plot}, Shape: {pred[sample_idx_plot].shape})')
             plt.colorbar()
 
-            plt.subplot(3, len(timesteps), i + 1 + 2 * len(timesteps))
-            plt.imshow(np.abs(pred_unpatched[batch_idx, channel_idx, t_idx].detach().cpu().numpy() - 
-                            target_unpatched[batch_idx, channel_idx, t_idx].detach().cpu().numpy()), vmin=-1, vmax=1)
-            plt.gca().invert_xaxis()
-            plt.title(f'Absolute Error t={t_idx}, ch={channel_idx}')
+            plt.subplot(133)
+            plt.imshow(np.abs(target[sample_idx_plot].detach().cpu().numpy() - pred[sample_idx_plot].detach().cpu().numpy()), aspect='auto', origin='lower', cmap='magma')
+            plt.title('Absolute Error Patched')
             plt.colorbar()
 
-        plt.suptitle('Unpatched Visualization')
-        plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/plots/3_unpatched.png")
-        plt.close()
+            plt.suptitle('Patched Visualization (Normalized, All Channels in Patch Dim)')
+            plt.tight_layout()
+            plt.savefig(f"{self.args.model_path}/plots/2_patched.png")
+            plt.close()
 
-        # 4 Un-normalized Data
-        plt.figure(figsize=(50, 10))
-        timesteps = range(0, T)
-        for i, t_idx in enumerate(timesteps):
-            plt.subplot(3, len(timesteps), i + 1)
-            plt.imshow(target_unnormalized[batch_idx, channel_idx, t_idx], vmin=0, vmax=22)
-            plt.gca().invert_xaxis()
-            plt.title(f'Target t={t_idx}, ch={channel_idx}')
-            plt.colorbar()
+            batch_idx_plot_list = range(1) # Index for selecting batch element for plotting
+            ch_vis_idx = 0 # Channel index for visualization
+            for batch_idx_plot in batch_idx_plot_list:
+                # 3 Unpatched Data (Normalized)
+                # Plot for each channel
+                plt.figure(figsize=(min(T_orig*2, 50), 10) ) # Adjust figure size
+                timesteps_to_plot = range(T_orig)
+                for i, t_idx in enumerate(timesteps_to_plot):
+                    if i >= 12 and T_orig > 12 : # Limit plots if too many timesteps
+                        break
+                    plt.subplot(3, min(len(timesteps_to_plot),12), i + 1)
+                    plt.imshow(target_numpy_normalized_unpatched[batch_idx_plot, ch_vis_idx, t_idx], vmin=-1, vmax=1, cmap='viridis')
+                    plt.gca().invert_xaxis()
+                    plt.title(f'Target t={t_idx}, ch={ch_vis_idx}')
+                    plt.colorbar()
 
-            plt.subplot(3, len(timesteps), i + 1 + len(timesteps))
-            plt.imshow(pred_unnormalized[batch_idx, channel_idx, t_idx], vmin=0, vmax=22)
-            plt.gca().invert_xaxis()
-            plt.title(f'Prediction t={t_idx}, ch={channel_idx}')
-            plt.colorbar()
+                    plt.subplot(3, min(len(timesteps_to_plot),12), i + 1 + min(len(timesteps_to_plot),12))
+                    plt.imshow(pred_numpy_normalized_unpatched[batch_idx_plot, ch_vis_idx, t_idx], vmin=-1, vmax=1, cmap='viridis')
+                    plt.gca().invert_xaxis()
+                    plt.title(f'Pred t={t_idx}, ch={ch_vis_idx}')
+                    plt.colorbar()
 
-            plt.subplot(3, len(timesteps), i + 1 + 2 * len(timesteps))
-            plt.imshow(np.abs(pred_unnormalized[batch_idx, channel_idx, t_idx] - target_unnormalized[batch_idx, channel_idx, t_idx]), vmin=0, vmax=22)
-            plt.gca().invert_xaxis()
-            plt.title(f'Absolute Error t={t_idx}, ch={channel_idx}')
-            plt.colorbar()
+                    plt.subplot(3, min(len(timesteps_to_plot),12), i + 1 + 2 * min(len(timesteps_to_plot),12))
+                    plt.imshow(np.abs(pred_numpy_normalized_unpatched[batch_idx_plot, ch_vis_idx, t_idx] - \
+                                    target_numpy_normalized_unpatched[batch_idx_plot, ch_vis_idx, t_idx]), vmin=0, vmax=1, cmap='magma')
+                    plt.gca().invert_xaxis()
+                    plt.title(f'Error t={t_idx}, ch={ch_vis_idx}')
+                    plt.colorbar()
+                plt.suptitle(f'Unpatched Normalized Visualization - Channel {ch_vis_idx}')
+                plt.tight_layout(rect=[0, 0, 1, 0.96])
+                plt.savefig(f"{self.args.model_path}/plots/3_unpatched_normalized_sample_{batch_idx_plot}_channel_{ch_vis_idx}.png")
+                plt.close()
 
-        plt.suptitle('Un-normalized Visualization (Original Scale)')
-        plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/plots/4_unnormalized.png")
-        plt.close()
+                # 4 Un-normalized Data (Original Scale)
+                plt.figure(figsize=(min(T_orig*2, 50), 10))
+                timesteps_to_plot = range(T_orig)
+                # Determine dynamic range for plotting for this channel
+                ch_min_val = min(target_unnormalized[batch_idx_plot, ch_vis_idx].min(), pred_unnormalized[batch_idx_plot, ch_vis_idx].min())
+                ch_max_val = max(target_unnormalized[batch_idx_plot, ch_vis_idx].max(), pred_unnormalized[batch_idx_plot, ch_vis_idx].max())
+                if ch_min_val == ch_max_val: ch_max_val += 1e-6 # Avoid same min/max for colorbar
 
-        # 5. Compute accuracy masks for each threshold
-        epsilon = 1
-        thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 2.0, 3.0, 4.0, 5.0]
-        threshold_labels = [f'{int(thresh * 100)}%' if thresh <= 1.0 else f'{int(thresh)}00%' for thresh in thresholds]
-        N, _, T, H_orig, W_orig = pred_unnormalized.shape # shape N, C, T, H, W
-        # For each timestep, create a grid showing where prediction matches target within threshold
-        acc_per_timestep = {label: [] for label in threshold_labels}
-        plt.figure(figsize=(160, 60))
-        for t_idx in range(T // 2, T):
-            for i, (thresh, label) in enumerate(zip(thresholds, threshold_labels)):
-                mask_within = np.abs(pred_unnormalized[batch_idx, channel_idx, t_idx] - target_unnormalized[batch_idx, channel_idx, t_idx]) <= (np.abs(target_unnormalized[batch_idx, channel_idx, t_idx]) * thresh + epsilon)
-                subplot_idx = (t_idx - T // 2) * len(thresholds) + i + 1
-                plt.subplot(T - T // 2, len(thresholds), subplot_idx)
-                plt.imshow(mask_within, cmap='Greens', vmin=0, vmax=1)
-                for y in range(H_orig):
-                    for x in range(W_orig):
-                        pred_val = pred_unnormalized[batch_idx, channel_idx, t_idx, y, x]
-                        target_val = target_unnormalized[batch_idx, channel_idx, t_idx, y, x]
-                        plt.text(x, y, f'{pred_val:.1f}\n{target_val:.1f}',
-                            ha='center', va='center', fontsize=6,
-                            color='black' if mask_within[y, x] else 'gray',
-                            bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.1'))
-                # Compute accuracy for this threshold and timestep
-                acc = np.sum(mask_within) / (H_orig * W_orig)
-                acc_per_timestep[label].append(acc)
-                plt.title(f'Timestep {t_idx} within {label}, accuracy {acc * 100:.2f}%')
-                plt.axis('off')
-        plt.suptitle(f'Prediction matches target within X%')
-        plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/plots/5_accuracy_within_thresholds_grid.png")
-        plt.close()
+                for i, t_idx in enumerate(timesteps_to_plot):
+                    if i >= 12 and T_orig > 12 :
+                        break
+                    plt.subplot(3, min(len(timesteps_to_plot),12), i + 1)
+                    plt.imshow(target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx], vmin=ch_min_val, vmax=ch_max_val, cmap='viridis')
+                    plt.gca().invert_xaxis()
+                    plt.title(f'Target t={t_idx}, ch={ch_vis_idx}')
+                    plt.colorbar()
 
-        # 5. Plot accuracy within X percent for each timestep
-        plt.figure(figsize=(16, 6))
-        for label in threshold_labels:
-            plt.plot(range(T // 2, T), acc_per_timestep[label], marker='o', label=f'Within {label}')
-        plt.xlabel('Timestep')
-        plt.ylabel('Accuracy (fraction within threshold)')
-        plt.title('Accuracy within X% per Timestep')
-        plt.ylim(0, 1)
-        plt.legend()
-        plt.grid()
-        plt.tight_layout()
-        plt.savefig(f"{self.args.model_path}/plots/5_accuracy_within_thresholds.png")
-        plt.close()
+                    plt.subplot(3, min(len(timesteps_to_plot),12), i + 1 + min(len(timesteps_to_plot),12))
+                    plt.imshow(pred_unnormalized[batch_idx_plot, ch_vis_idx, t_idx], vmin=ch_min_val, vmax=ch_max_val, cmap='viridis')
+                    plt.gca().invert_xaxis()
+                    plt.title(f'Pred t={t_idx}, ch={ch_vis_idx}')
+                    plt.colorbar()
 
-        # Save json files
-        with open(f"{self.args.model_path}/plots/pred_model.json", "w") as pred_file:
-            json.dump(pred.tolist(), pred_file)
-        with open(f"{self.args.model_path}/plots/target_model.json", "w") as target_file:
-            json.dump(target.tolist(), target_file)
-        with open(f"{self.args.model_path}/plots/pred_masked.json", "w") as pred_file:
-            json.dump(pred_masked.tolist(), pred_file)
-        with open(f"{self.args.model_path}/plots/target_masked.json", "w") as target_file:
-            json.dump(target_masked.tolist(), target_file)
-        with open(f"{self.args.model_path}/plots/pred_patched.json", "w") as pred_file:
-            json.dump(pred_patched.tolist(), pred_file)
-        with open(f"{self.args.model_path}/plots/target_patched.json", "w") as target_file:
-            json.dump(target_patched.tolist(), target_file)
-        with open(f"{self.args.model_path}/plots/pred_unpatched.json", "w") as pred_file:
-            json.dump(pred_unpatched.tolist(), pred_file)
-        with open(f"{self.args.model_path}/plots/target_unpatched.json", "w") as target_file:
-            json.dump(target_unpatched.tolist(), target_file)
-        with open(f"{self.args.model_path}/plots/pred_unnormalized.json", "w") as pred_file:
-            json.dump(pred_unnormalized.tolist(), pred_file)
-        with open(f"{self.args.model_path}/plots/target_unnormalized.json", "w") as target_file:
-            json.dump(target_unnormalized.tolist(), target_file)
+                    plt.subplot(3, min(len(timesteps_to_plot),12), i + 1 + 2 * min(len(timesteps_to_plot),12))
+                    plt.imshow(np.abs(pred_unnormalized[batch_idx_plot, ch_vis_idx, t_idx] - target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx]), vmin=0, vmax=max(1e-6, (ch_max_val-ch_min_val)/2), cmap='magma')
+                    plt.gca().invert_xaxis()
+                    plt.title(f'Error t={t_idx}, ch={ch_vis_idx}')
+                    plt.colorbar()
+                plt.suptitle(f'Un-normalized Visualization (Original Scale) - Channel {ch_vis_idx}')
+                plt.tight_layout(rect=[0, 0, 1, 0.96])
+                plt.savefig(f"{self.args.model_path}/plots/4_unnormalized_sample_{batch_idx_plot}_channel_{ch_vis_idx}.png")
+                plt.close()
 
-        return {
+                # 5. Compute accuracy masks for each threshold
+                epsilon = 1 # Use consistent epsilon
+                thresholds = [0.1, 0.3, 0.5, 0.7, 1.0, 3.0, 5.0]
+                threshold_labels = [f'{int(thresh * 100)}%' if thresh <= 1.0 else f'{int(thresh)}00%' for thresh in thresholds]
+
+                acc_per_timestep_channel = {label: [] for label in threshold_labels}
+                
+                # Create grid plot for current channel
+                # Figure size is very large, kept as is from original
+                fig_grid, axes_grid = plt.subplots(T_orig - T_orig // 2, len(thresholds), figsize=(160, 60), squeeze=False)
+                
+                for t_idx_orig_offset, t_idx_orig in enumerate(range(T_orig // 2, T_orig)):
+                    for i_thresh, (thresh, label) in enumerate(zip(thresholds, threshold_labels)):
+                        ax = axes_grid[t_idx_orig_offset, i_thresh]
+                        mask_within = np.abs(pred_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] - target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig]) <= \
+                                        (np.abs(target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig]) * thresh + epsilon)
+                        
+                        ax.imshow(mask_within, cmap='Greens', vmin=0, vmax=1)
+                        for y_ax in range(H_orig):
+                            for x_ax in range(W_orig):
+                                pred_val = pred_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig, y_ax, x_ax]
+                                target_val = target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig, y_ax, x_ax]
+                                ax.text(x_ax, y_ax, f'{pred_val:.1f}\n{target_val:.1f}',
+                                    ha='center', va='center', fontsize=6,
+                                    color='black' if mask_within[y_ax, x_ax] else 'gray',
+                                    bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.1'))
+                        
+                        acc = np.sum(mask_within) / (H_orig * W_orig) if (H_orig * W_orig) > 0 else 0
+                        acc_per_timestep_channel[label].append(acc)
+                        ax.set_title(f'T={t_idx_orig} {label}, Acc={acc * 100:.2f}%', fontsize=8)
+                        ax.axis('off')
+                
+                fig_grid.suptitle(f'Prediction Acceptance Rate Grid - Channel {ch_vis_idx} (Sample {batch_idx_plot})')
+                plt.tight_layout(rect=[0, 0.03, 1, 0.97]) # Adjust layout to make space for suptitle
+                plt.savefig(f"{self.args.model_path}/plots/5_acceptance_grid_sample_{batch_idx_plot}_channel_{ch_vis_idx}.png")
+                plt.close(fig_grid)
+
+                # Plot acceptance within X percent for each timestep for current channel
+                plt.figure(figsize=(16, 6))
+                for label in threshold_labels:
+                    plt.plot(range(T_orig // 2, T_orig), acc_per_timestep_channel[label], marker='o', label=f'Within {label}')
+                plt.xlabel('Timestep')
+                plt.ylabel('Acceptance Rate')
+                plt.title(f'Prediction Acceptance Rate vs. Timestep - Channel {ch_vis_idx} (Sample {batch_idx_plot})')
+                plt.ylim(0, 1)
+                plt.legend()
+                plt.grid()
+                plt.tight_layout()
+                plt.savefig(f"{self.args.model_path}/plots/5_acceptance_vs_timestep_sample_{batch_idx_plot}_channel_{ch_vis_idx}.png")
+                plt.close()
+
+            # Save json files
+            with open(f"{self.args.model_path}/plots/pred_model.json", "w") as pred_file:
+                json.dump(pred.tolist(), pred_file)
+            with open(f"{self.args.model_path}/plots/target_model.json", "w") as target_file:
+                json.dump(target.tolist(), target_file)
+            with open(f"{self.args.model_path}/plots/pred_masked.json", "w") as pred_file:
+                json.dump(pred_masked.tolist(), pred_file)
+            with open(f"{self.args.model_path}/plots/target_masked.json", "w") as target_file:
+                json.dump(target_masked.tolist(), target_file)
+            with open(f"{self.args.model_path}/plots/pred_patched.json", "w") as pred_file:
+                json.dump(pred.tolist(), pred_file) # Changed pred_patched to pred
+            with open(f"{self.args.model_path}/plots/target_patched.json", "w") as target_file:
+                json.dump(target.tolist(), target_file) # Changed target_patched to target
+            with open(f"{self.args.model_path}/plots/pred_unpatched.json", "w") as pred_file:
+                json.dump(pred_unpatched.tolist(), pred_file)
+            with open(f"{self.args.model_path}/plots/target_unpatched.json", "w") as target_file:
+                json.dump(target_unpatched.tolist(), target_file)
+            with open(f"{self.args.model_path}/plots/pred_unnormalized.json", "w") as pred_file:
+                json.dump(pred_unnormalized.tolist(), pred_file)
+            with open(f"{self.args.model_path}/plots/target_unnormalized.json", "w") as target_file:
+                json.dump(target_unnormalized.tolist(), target_file)
+
+        return { # Return unpatched, unnormalized numpy arrays
             'masked': {
-                'predictions': pred_masked.detach().cpu().numpy(),
-                'targets': target_masked.detach().cpu().numpy()
+                'predictions': pred_masked.detach().cpu().numpy(), # still normalized, patched, masked
+                'targets': target_masked.detach().cpu().numpy()   # still normalized, patched, masked
             },
-            'full': {
+            'full_unpatched': {
                 'normalized': {
-                    'predictions': pred_numpy,
-                    'targets': target_numpy
+                    'predictions': pred_numpy_normalized_unpatched, # [N, C, T, H, W]
+                    'targets': target_numpy_normalized_unpatched    # [N, C, T, H, W]
                 },
                 'original_scale': {
-                    'predictions': pred_unnormalized,
-                    'targets': target_unnormalized
+                    'predictions': pred_unnormalized, # [N, C, T, H, W]
+                    'targets': target_unnormalized    # [N, C, T, H, W]
                 }
             },
-            'spatial_shape': (N, T, H, W),
-            'mask': mask.detach().cpu().numpy()
+            'spatial_shape': (N, T_orig, H_orig, W_orig), # Original spatial-temporal shape
+            'mask': mask.detach().cpu().numpy() # [N, L_patch]
         }
 
 
     def Sample(self, test_data, step, mask_ratio, mask_strategy, seed=None, dataset='', index=0, Type='val'):
         print(f"Sample, Type {Type}, dataset {dataset}, mask_strategy {mask_strategy}, mask_ratio {mask_ratio}, index {index}")
         
-        # Debug print for input data shape
         print("\n=== Input Data Shape ===")
         print(f"Expected input shape: [batch, channels, time, height, width]")
-        # Get first batch from DataLoader
         for batch in test_data[index]:
             print(f"Actual input shape: {[t.shape for t in batch]}")
             break
-        
+
         self.model.eval()
-        error = 0
-        error_mae = 0
-        error_norm = 0
-        num = 0
-        num2 = 0
-        acc_within = {0.1: 0, 0.2: 0, 0.3: 0}
-        acc_total = 0
-        thresholds = [0.1, 0.2, 0.3]
+        thresholds = [0.1, 0.3, 0.5, 0.7, 1.0, 3.0, 5.0]
+        accuracy_metrics = {}
+        epsilon = 1
+        rmse, mae, loss_test, num = 0, 0, 0, 0
 
         with torch.no_grad():
-            all_predictions = []
-
-            error_mae, error_norm, error, num, error2, num2 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-            thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 2.0, 3.0, 4.0, 5.0]
-            acc_within = {thresh: 0 for thresh in thresholds}
-            acc_total = 0
-
             for idx, batch in enumerate(test_data[index]):
-                # Debug print for batch shapes
-                print(f"\n=== Batch {idx} Shapes ===")
-                print(f"Batch tensors shapes: {[t.shape for t in batch]}")
-                
-                loss, _, pred, target, mask, ids_restore, input_size = self.model_forward(batch, self.model, mask_ratio, mask_strategy, seed=seed, data = dataset, mode='forward')
+                # Forward pass
+                loss_masked_norm, _, pred_patched, target_patched, mask, _, input_size = self.model_forward(
+                    batch, self.model, mask_ratio, mask_strategy, seed=seed, data=dataset, mode='forward'
+                )
 
-                # Debug print for model output shapes
-                print("\n=== Model Output Shapes ===")
-                print(f"pred shape: {pred.shape}")
-                print(f"target shape: {target.shape}")
-                print(f"mask shape: {mask.shape}")
-                print(f"ids_restore shape: {ids_restore.shape}")
-                print(f"input_size: {input_size}")
+                # Call extract_predictions
+                extracted_data = self.extract_predictions(pred_patched, target_patched, mask, input_size, dataset)
 
-                # # Extract both masked and unmasked predictions
-                # results = self.extract_predictions(pred, target, mask, input_size, dataset)
-                # all_predictions.append(results)
+                # Use only channel C=0 for accuracy metrics
+                pred_c0 = extracted_data['full_unpatched']['original_scale']['predictions'][:, 0, :, :, :]
+                target_c0 = extracted_data['full_unpatched']['original_scale']['targets'][:, 0, :, :, :]
 
-                pred = torch.clamp(pred, min=-1, max=1)
+                # Filter timesteps where T > his_len
+                if pred_c0.shape[1] > self.args.his_len:
+                    print(f"size pred_c0: {pred_c0.shape}, target_c0: {target_c0.shape}")
+                    pred_c0 = pred_c0[:, self.args.his_len:, :, :]
+                    target_c0 = target_c0[:, self.args.his_len:, :, :]
+                else:
+                    print(f"Calculating accuracy for all timesteps, shape: {pred_c0.shape}, T: {pred_c0.shape[1]}, his_len: {self.args.his_len}")
 
-                pred_mask = pred.squeeze(dim=2)
-                target_mask = target.squeeze(dim=2)
+                # Calculate RMSE and MAE
+                pred_np = pred_c0.flatten()
+                target_np = target_c0.flatten()
+                rmse += np.sqrt(mean_squared_error(pred_np, target_np))
+                mae += mean_absolute_error(pred_np, target_np)
 
-                # Debug print for masked tensors
-                print("\n=== Masked Tensor Shapes ===")
-                print(f"pred_mask shape: {pred_mask.shape}")
-                print(f"target_mask shape: {target_mask.shape}")
-                print(f"mask shape: {mask.shape}")
-
-                # Process each feature separately
-                print("\n=== Feature Processing ===")
-                for feature_idx in range(pred_mask.shape[-1]):
-                    print(f"\nProcessing feature {feature_idx}:")
-                    pred_feature = pred_mask[..., feature_idx]
-                    target_feature = target_mask[..., feature_idx]
-                    
-                    print(f"Feature {feature_idx} shapes:")
-                    print(f"pred_feature shape: {pred_feature.shape}")
-                    print(f"target_feature shape: {target_feature.shape}")
-                    
-                    # Inverse transform to original scale for this feature
-                    pred_vals = self.args.scaler[dataset].inverse_transform(pred_feature[mask==1].reshape(-1,1).detach().cpu().numpy()).flatten()
-                    target_vals = self.args.scaler[dataset].inverse_transform(target_feature[mask==1].reshape(-1,1).detach().cpu().numpy()).flatten()
-                    
-                    print(f"Feature {feature_idx} final values:")
-                    print(f"pred_vals shape: {pred_vals.shape}")
-                    print(f"target_vals shape: {target_vals.shape}")
-                    print(f"RMSE for feature {feature_idx}: {np.sqrt(mean_squared_error(pred_vals, target_vals, squared=True)):.4f}")
-                    print(f"MAE for feature {feature_idx}: {mean_absolute_error(pred_vals, target_vals):.4f}")
-
-                # Inverse transform to original scale
-                pred_vals = self.args.scaler[dataset].inverse_transform(pred_mask[mask==1].reshape(-1,1).detach().cpu().numpy()).flatten()
-                target_vals = self.args.scaler[dataset].inverse_transform(target_mask[mask==1].reshape(-1,1).detach().cpu().numpy()).flatten()
-
-                # Debug print for final values
-                print("\n=== Final Value Shapes ===")
-                print(f"pred_vals shape: {pred_vals.shape}")
-                print(f"target_vals shape: {target_vals.shape}")
-
-                epsilon = 1
+                # Calculate accuracy
+                acc_within = {thresh: 0 for thresh in thresholds}
+                acc_total = pred_np.size
                 for thresh in thresholds:
-                    within = np.abs(pred_vals - target_vals) <= (np.abs(target_vals) * thresh + epsilon)
-                    acc_within[thresh] += np.sum(within)
-                acc_total += len(target_vals)
+                    mask_within = np.abs(pred_np - target_np) <= (np.abs(target_np) * thresh + epsilon)
+                    acc_within[thresh] += np.sum(mask_within)
+                accuracy_metrics = {thresh: acc_within[thresh] / acc_total for thresh in thresholds}
 
-                error += mean_squared_error(pred_vals, target_vals, squared=True) * mask.sum().item()
-                error_mae += mean_absolute_error(pred_vals, target_vals) * mask.sum().item()
-                error_norm += loss.item() * mask.sum().item()
+                # Accumulate loss and num
+                loss_test += loss_masked_norm.item()
                 num += mask.sum().item()
-                num2 += (1-mask).sum().item()
 
-        rmse = np.sqrt(error / num)
-        mae = error_mae / num
-        loss_test = error_norm / num
-        accuracy_metrics = 0
-        # accuracy_metrics = {thresh: (acc_within[thresh] / acc_total if acc_total > 0 else 0.0) for thresh in thresholds}
+        # Average metrics over all batches
+        rmse /= len(test_data[index])
+        mae /= len(test_data[index])
+        loss_test /= len(test_data[index])
 
-        # print(f"Dataset: {dataset}")
-        # print(f"Index: {index}")
-        # print(f"Step: {step}")
-        # print(f"Seed: {seed}")
-        # print(f"Type: {Type}")
-        # print(f"Batch: {len(batch)}")
-        # print(f"Predictions: {pred_vals.shape}")
-        # print(f"Targets: {target_vals.shape}")
-        # print(f"All Predictions: {len(all_predictions)}")
-        # print(f"Mask Strategy: {mask_strategy}")
-        # print(f"Mask Ratio: {mask_ratio}")
-
-        # print(f"Prediction Acceptance Rate at X Percent:")
-        # for thresh in thresholds:
-        #     print(f"  {int(thresh*100)}%: {accuracy_metrics[thresh]:.4f}")
-        # print(f"RMSE: {rmse:.4f}")
-        # print(f"MAE: {mae:.4f}")
-        # print(f"Loss: {loss_test:.4f}")
-        # print(f"Num: {num:.4f}")
-        # print(f"Num2: {num2:.4f}")
+        print(f"\n--- Event Prediction Acceptance Rate ---")
+        for label, acc in accuracy_metrics.items():
+            percent = float(label.strip('%')) if isinstance(label, str) and '%' in label else float(label) * 100
+            print(f"Threshold {percent:.0f}%: Acceptance Rate = {acc * 100:.2f}%")
+        print(f"--- RMSE and MAE ---")
+        print(f"RMSE: {rmse:.4f}")
+        print(f"MAE: {mae:.4f}")
+        print(f"Loss: {loss_test:.4f}")
+        print(f"Num: {num}")
 
         return rmse, mae, loss_test, accuracy_metrics
 
@@ -603,15 +559,23 @@ class TrainLoop:
 
     def forward_backward(self, batch, step, mask_ratio, mask_strategy, index, name=None):
 
-        loss , _, pred, target, mask, _, _ = self.model_forward(batch, self.model, mask_ratio, mask_strategy, data=name, mode='backward')
-
-        pred_mask = pred.squeeze(dim=2)[mask==1]
-        target_mask = target.squeeze(dim=2)[mask==1]
-        loss_real = mean_squared_error(self.args.scaler[name].inverse_transform(pred_mask.reshape(-1,1).detach().cpu().numpy()), self.args.scaler[name].inverse_transform(target_mask.reshape(-1,1).detach().cpu().numpy()), squared=True)
+        # loss is the mean squared error on normalized, masked patches from model's forward_loss
+        loss , _, _pred, _target, mask, _, _ = self.model_forward(batch, self.model, mask_ratio, mask_strategy, data=name, mode='backward')
+    
+        # For logging 'loss_real' (which is used for RMSE logging during training),
+        # we use the 'loss' itself, which is the mean squared error on normalized masked patches.
+        # Detailed unnormalized metrics are computed during Sample/Evaluation phases.
+        loss_real = loss.item() 
     
         loss.backward()
 
+        # Log normalized RMSE for this training step
         self.writer.add_scalar('Training/Loss_step', np.sqrt(loss_real), step)
+        
+        # loss.item() is mean MSE for masked patches
+        # mask.sum().item() is the number of masked patches
+        # loss_real is also mean MSE for masked patches
+        # (1-mask).sum().item() is the number of unmasked/visible patches
         return loss.item(), mask.sum().item(), loss_real, (1-mask).sum().item()
 
     def _anneal_lr(self):

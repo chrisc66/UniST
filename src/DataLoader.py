@@ -9,34 +9,83 @@ import random
 class MinMaxNormalization(object):
     """
         MinMax Normalization --> [-1, 1]
+        Performs normalization per channel.
         x = (x - min) / (max - min).
         x = x * 2 - 1
     """
 
     def __init__(self):
-        pass
+        self._min = None
+        self._max = None
+        self.num_channels = None
 
-    # Calculate min and max values from data
+    # Calculate min and max values from data per channel
     def fit(self, X):
-        self._min = X.min()
-        self._max = X.max()
-        print("min:", self._min, "max:", self._max)
+        """
+        X: torch.Tensor of shape [N, C, T, H, W]
+        """
+        if not isinstance(X, torch.Tensor):
+            raise TypeError("Input X must be a torch.Tensor for fit method.")
+        
+        self.num_channels = X.shape[1]
+        self._min = torch.zeros(self.num_channels, device=X.device)
+        self._max = torch.zeros(self.num_channels, device=X.device)
+
+        for ch in range(self.num_channels):
+            self._min[ch] = X[:, ch, ...].min()
+            self._max[ch] = X[:, ch, ...].max()
+        
+        print(f"Scaler fitted. Num channels: {self.num_channels}, min: {self._min}, max: {self._max}")
 
     def transform(self, X):
-        # Normalize to [0,1] then to [-1,1]
-        X = 1. * (X - self._min) / (self._max - self._min)
-        X = X * 2. - 1.
-        return X
+        """
+        X: torch.Tensor of shape [N, C, T, H, W]
+        """
+        if self._min is None or self._max is None:
+            raise ValueError("Scaler has not been fitted. Call fit() before transform().")
+        if not isinstance(X, torch.Tensor):
+            raise TypeError("Input X must be a torch.Tensor for transform method.")
+        if X.shape[1] != self.num_channels:
+            raise ValueError(f"Input X has {X.shape[1]} channels, but scaler was fitted for {self.num_channels} channels.")
+
+        X_transformed = X.clone()
+        # Move scaler params to X's device if not already there
+        current_min = self._min.to(X.device)
+        current_max = self._max.to(X.device)
+
+        for ch in range(self.num_channels):
+            denominator = current_max[ch] - current_min[ch]
+            if denominator == 0:
+                denominator = 1e-8  # Avoid division by zero; effectively makes this channel 0 if min=max
+            X_transformed[:, ch, ...] = (X[:, ch, ...] - current_min[ch]) / denominator
+        
+        X_transformed = X_transformed * 2. - 1.
+        return X_transformed
 
     def fit_transform(self, X):
-        self.fit(X)  # First calculate min and max
-        return self.transform(X) # Then normalize the data
+        self.fit(X)
+        return self.transform(X)
 
     def inverse_transform(self, X):
-        # Convert back from [-1,1] to original scale
-        X = (X + 1.) / 2.
-        X = 1. * X * (self._max - self._min) + self._min
-        return X
+        """
+        X: torch.Tensor of shape [N, C, T, H, W]
+        """
+        if self._min is None or self._max is None:
+            raise ValueError("Scaler has not been fitted. Call fit() before inverse_transform().")
+        if not isinstance(X, torch.Tensor):
+            raise TypeError("Input X must be a torch.Tensor for inverse_transform method.")
+        if X.shape[1] != self.num_channels:
+            raise ValueError(f"Input X has {X.shape[1]} channels, but scaler was fitted for {self.num_channels} channels.")
+
+        X_inv = X.clone()
+        # Move scaler params to X's device if not already there
+        current_min = self._min.to(X.device)
+        current_max = self._max.to(X.device)
+
+        X_inv = (X_inv + 1.) / 2.
+        for ch in range(self.num_channels):
+            X_inv[:, ch, ...] = X_inv[:, ch, ...] * (current_max[ch] - current_min[ch]) + current_min[ch]
+        return X_inv
 
 
 def data_load_single(args, dataset): 
@@ -58,28 +107,32 @@ def data_load_single(args, dataset):
     """
         Converts JSON data to PyTorch tensors
         Adds channel dimension with unsqueeze(1)
-        Shape: [N, 1, T, H, W] where:
+        Shape: [N, C, T, H, W] where:
         N: Number of samples
-        1: Channel dimension
+        C: Channel dimension
         T: Time steps
         H, W: Height and width
     """
-    X_train = torch.tensor(data_all['X_train'][0])
-    X_test = torch.tensor(data_all['X_test'][0])
-    X_val = torch.tensor(data_all['X_val'][0])
-    if X_train.ndim == X_test.ndim == X_val.ndim == 4:
-        X_train = X_train.unsqueeze(1)
+    # Ensure data is float32 for calculations and model compatibility
+    X_train = torch.tensor(data_all['X_train'][0], dtype=torch.float32)
+    X_test = torch.tensor(data_all['X_test'][0], dtype=torch.float32)
+    X_val = torch.tensor(data_all['X_val'][0], dtype=torch.float32)
+
+    if X_train.ndim == 4: # Assuming [N, T, H, W]
+        X_train = X_train.unsqueeze(1) # Add channel dim -> [N, 1, T, H, W]
         X_test = X_test.unsqueeze(1)
         X_val = X_val.unsqueeze(1)
-    elif X_train.ndim == X_test.ndim == X_val.ndim == 5:
-        X_train = X_train.permute(0, 2, 1, 3, 4)
+    elif X_train.ndim == 5: # Assuming [N, T, C, H, W]
+        X_train = X_train.permute(0, 2, 1, 3, 4) # Permute to [N, C, T, H, W]
         X_test = X_test.permute(0, 2, 1, 3, 4)
         X_val = X_val.permute(0, 2, 1, 3, 4)
     else:
         raise ValueError(f"Input data should be 4D or 5D tensor, X_train {X_train.ndim}, X_test {X_test.ndim}, X_val {X_val.ndim}")
-    print("data_load_single X_train shape:", X_train.shape)
-    print("data_load_single X_test shape:", X_test.shape)
-    print("data_load_single X_val shape:", X_val.shape)
+    
+    print(f"Dataset: {dataset}")
+    print("data_load_single X_train shape (before norm):", X_train.shape)
+    print("data_load_single X_test shape (before norm):", X_test.shape)
+    print("data_load_single X_val shape (before norm):", X_val.shape)
 
     # Load periodic data and rearrange dimensions
     """
@@ -91,9 +144,9 @@ def data_load_single(args, dataset):
         T: Time steps
         H, W: Height and width (Spatial dimension - height/width of the grid)
     """
-    X_train_period = torch.tensor(data_all['X_train'][1]).permute(0,2,1,3,4)
-    X_test_period = torch.tensor(data_all['X_test'][1]).permute(0,2,1,3,4)
-    X_val_period = torch.tensor(data_all['X_val'][1]).permute(0,2,1,3,4)
+    X_train_period = torch.tensor(data_all['X_train'][1], dtype=torch.float32).permute(0,2,1,3,4)
+    X_test_period = torch.tensor(data_all['X_test'][1], dtype=torch.float32).permute(0,2,1,3,4)
+    X_val_period = torch.tensor(data_all['X_val'][1], dtype=torch.float32).permute(0,2,1,3,4)
 
     #Stores sequence length and spatial dimensions
     #Used later for batch size selection
@@ -138,25 +191,24 @@ def data_load_single(args, dataset):
         raise NotImplementedError(f"Not implemented dataset {dataset}")
 
     my_scaler = MinMaxNormalization()
-    MAX = max(torch.max(X_train).item(), torch.max(X_test).item(), torch.max(X_val).item())
-    MIN = min(torch.min(X_train).item(), torch.min(X_test).item(), torch.min(X_val).item())
-    my_scaler.fit(np.array([MIN, MAX]))
+    # Fit the scaler ONLY on the training data (X_train)
+    my_scaler.fit(X_train)
 
-    # Normalizes all data to [-1, 1] range
-    # Reshapes for normalization then back to original shape
-    """
-        Why Reshape?
-        - Normalization requires 2D data (features x samples)
-        - Need to convert 5D data (N, C, T, H, W) to 2D
-        - Reshape to (N*C*T, H*W) then normalize
-        - Reshape back to original shape
-    """
-    X_train = my_scaler.transform(X_train.reshape(-1,1)).reshape(X_train.shape)
-    X_test = my_scaler.transform(X_test.reshape(-1,1)).reshape(X_test.shape)
-    X_val = my_scaler.transform(X_val.reshape(-1,1)).reshape(X_val.shape)
-    X_train_period = my_scaler.transform(X_train_period.reshape(-1,1)).reshape(X_train_period.shape)
-    X_test_period = my_scaler.transform(X_test_period.reshape(-1,1)).reshape(X_test_period.shape)
-    X_val_period = my_scaler.transform(X_val_period.reshape(-1,1)).reshape(X_val_period.shape)
+    # Normalizes all data to [-1, 1] range using per-channel statistics
+    X_train = my_scaler.transform(X_train)
+    X_test = my_scaler.transform(X_test)
+    X_val = my_scaler.transform(X_val)
+    
+    # Assuming X_period data should be scaled with the same parameters as X_train
+    # This requires X_period to have the same number of channels as X_train.
+    if X_train_period.shape[1] == my_scaler.num_channels:
+        X_train_period = my_scaler.transform(X_train_period)
+        X_test_period = my_scaler.transform(X_test_period)
+        X_val_period = my_scaler.transform(X_val_period)
+    else:
+        print(f"Warning: X_period for dataset {dataset} has {X_train_period.shape[1]} channels, "
+              f"while scaler was fitted for {my_scaler.num_channels} channels. X_period will not be scaled by this scaler.")
+
 
     """
         Creates list of data for each dataset

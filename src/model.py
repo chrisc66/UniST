@@ -525,7 +525,7 @@ class UniST(nn.Module):
 
     def patchify(self, imgs):
         """
-        imgs: (N, 1, T, H, W)
+        imgs: (N, C, T, H, W)
         x: (N, L, patch_size**2 *1)
         """
         N, C, T, H, W = imgs.shape
@@ -645,7 +645,8 @@ class UniST(nn.Module):
             x_period = self.Embedding.value_embedding(x_period).reshape(N, P, -1, self.embed_dim)
 
         # x_period = x_period.permute(0,2,1,3).reshape(-1,x_period.shape[1],x_period.shape[-1])
-        Seq_out = 48
+        Seq_out = 48 # MciTRTDT
+        # Seq_out = 726 # MciTRT
         x_period = x_period.reshape(N, P, Seq_out, self.embed_dim) # (N, P, Seq_out, embed_dim)
         x_period_for_prompt = x_period.permute(0, 2, 1, 3) # (N, Seq_out, P, embed_dim)
         x_period_for_prompt = x_period_for_prompt.reshape(N * Seq_out, P, self.embed_dim) # (N*Seq_out, P, embed_dim)
@@ -802,22 +803,64 @@ class UniST(nn.Module):
 
     def forward_loss(self, imgs, pred, mask):
         """
-        imgs: [N, 1, T, H, W]
-        pred: [N, t*h*w, u*p*p*1]
-        mask: [N*t, h*w], 0 is keep, 1 is remove,
+        imgs: [N, C, T, H, W]
+        pred: [N, t*h*w, u*p*p*C_model] (output from decoder_pred)
+        mask: [N, L], 0 is keep, 1 is remove (masked by model)
         """
 
-        target = self.patchify(imgs)
+        target = self.patchify(imgs) # Patchify ground truth images -> [N, L, u*p*p*C_model]
+        # pred and target are both in the patched domain, normalized.
+        # L = t*h*w (number of patches)
+        # D_patch_full = u*p*p*C_model (dimension of a flattened patch including all channels)
 
-        assert pred.shape == target.shape
+        C_model = self.in_chans # Number of channels in the input data (e.g., 2)
+        
+        loss_channels_contribution = []
 
-        loss = (pred - target) ** 2
-        loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
-        mask = mask.view(loss.shape)
+        # Define channel weights. Default to equal weights if not specified or incorrect length.
+        # Expected format for args.loss_channel_weights: a list of floats, e.g., [1.0, 1.0]
+        channel_weights = getattr(self.args, 'loss_channel_weights', [1.0] * C_model)
+        if not isinstance(channel_weights, list) or len(channel_weights) != C_model:
+            print(f"Warning: loss_channel_weights not properly defined in args or length mismatch. Defaulting to equal weights for {C_model} channels.")
+            channel_weights = [1.0] * C_model
+        
+        # Ensure weights sum to C_model for averaging later, or normalize them
+        # For simplicity, we can just use them as direct multipliers if the overall loss scale is managed by LR.
+        # Let's assume they are relative weights.
 
-        loss1 = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
-        loss2 = (loss * (1-mask)).sum() / (1-mask).sum()
-        return loss1, loss2, target
+        for ch_idx in range(C_model):
+            # Extract data for the current channel from the flattened patch dimension
+            # If patchify output is [N, L, val_ch0_p0, val_ch1_p0, val_ch0_p1, val_ch1_p1 ...], then C is the fastest moving.
+            # From patchify: x = torch.einsum("nctuhpwq->nthwupqc", x) -> N, t, h, w, u, p, q, C_model
+            # Then reshape to (N, L, u * p**2 * C_model). So C_model is the last varying index within the patch dimension.
+            
+            pred_ch = pred[..., ch_idx::C_model]  # Selects every C-th element starting from ch_idx
+            target_ch = target[..., ch_idx::C_model]
+
+            channel_loss_mse_per_element = (pred_ch - target_ch) ** 2
+            channel_loss_mse_per_patch = channel_loss_mse_per_element.mean(dim=-1) # [N, L], mean loss per patch for this channel
+            loss_channels_contribution.append(channel_weights[ch_idx] * channel_loss_mse_per_patch)
+
+        # Sum the weighted losses from each channel
+        total_weighted_loss_per_patch = torch.stack(loss_channels_contribution, dim=0).sum(dim=0) # [N,L]
+        
+        # Normalize by sum of weights to keep loss scale somewhat consistent, or assume LR handles it.
+        # If weights are e.g. [0.5, 0.5], sum_weights = 1. If [1,1], sum_weights = 2.
+        # Normalizing by sum of weights makes it an average if weights are seen as proportions.
+        sum_of_weights = sum(channel_weights)
+        if sum_of_weights == 0: # Avoid division by zero if all weights are zero
+            sum_of_weights = 1.0 
+            
+        final_loss_per_patch = total_weighted_loss_per_patch / sum_of_weights
+
+        mask_view = mask.view(final_loss_per_patch.shape) # mask is [N,L]
+
+        # loss1 is the primary loss for backpropagation (loss on masked/removed patches)
+        loss1 = (final_loss_per_patch * mask_view).sum() / (mask_view.sum() + 1e-8) 
+        # loss2 is for observation (loss on visible/kept patches)
+        loss2 = (final_loss_per_patch * (1 - mask_view)).sum() / ((1 - mask_view).sum() + 1e-8)
+        
+        return loss1, loss2, target # Return the original full target for other uses
 
 
     def forward(self, imgs, mask_ratio=0.5, mask_strategy='random',seed=None, data='none', mode='backward'):
