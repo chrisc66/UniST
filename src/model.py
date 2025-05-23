@@ -1,5 +1,6 @@
 from functools import partial
 
+import os
 import torch
 import torch.nn as nn
 import math
@@ -549,11 +550,10 @@ class UniST(nn.Module):
         imgs: (N, L, patch_size**2 * t_patch_size)
         Returns: (N, T, H, W)
         """
-        C = 2
         N, T, H, W, p, u, t, h, w = self.patch_info
-        imgs = imgs.reshape(N, t, h, w, u, p, p, C)
+        imgs = imgs.reshape(N, t, h, w, u, p, p, self.in_chans)
         imgs = torch.einsum("nthwupqc->nctuhpwq", imgs)
-        imgs = imgs.reshape(N, C, T, h * p, w * p)
+        imgs = imgs.reshape(N, self.in_chans, T, h * p, w * p)
         return imgs
 
 
@@ -804,38 +804,33 @@ class UniST(nn.Module):
     def forward_loss(self, imgs, pred, mask):
         """
         imgs: [N, C, T, H, W]
-        pred: [N, t*h*w, u*p*p*C_model] (output from decoder_pred)
+        pred: [N, t*h*w, u*p*p*self.in_chans] (output from decoder_pred)
         mask: [N, L], 0 is keep, 1 is remove (masked by model)
         """
 
-        target = self.patchify(imgs) # Patchify ground truth images -> [N, L, u*p*p*C_model]
-        # pred and target are both in the patched domain, normalized.
-        # L = t*h*w (number of patches)
-        # D_patch_full = u*p*p*C_model (dimension of a flattened patch including all channels)
-
-        C_model = self.in_chans # Number of channels in the input data (e.g., 2)
+        target = self.patchify(imgs) # Patchify ground truth images -> [N, L, u*p*p*self.in_chans]
         
         loss_channels_contribution = []
 
         # Define channel weights. Default to equal weights if not specified or incorrect length.
         # Expected format for args.loss_channel_weights: a list of floats, e.g., [1.0, 1.0]
-        channel_weights = getattr(self.args, 'loss_channel_weights', [1.0] * C_model)
-        if not isinstance(channel_weights, list) or len(channel_weights) != C_model:
-            print(f"Warning: loss_channel_weights not properly defined in args or length mismatch. Defaulting to equal weights for {C_model} channels.")
-            channel_weights = [1.0] * C_model
+        channel_weights = getattr(self.args, 'loss_channel_weights', [1.0] * self.in_chans)
+        if not isinstance(channel_weights, list) or len(channel_weights) != self.in_chans:
+            print(f"Warning: loss_channel_weights not properly defined in args or length mismatch. Defaulting to equal weights for {self.in_chans} channels.")
+            channel_weights = [1.0] * self.in_chans
         
-        # Ensure weights sum to C_model for averaging later, or normalize them
+        # Ensure weights sum to self.in_chans for averaging later, or normalize them
         # For simplicity, we can just use them as direct multipliers if the overall loss scale is managed by LR.
         # Let's assume they are relative weights.
 
-        for ch_idx in range(C_model):
+        for ch_idx in range(self.in_chans):
             # Extract data for the current channel from the flattened patch dimension
             # If patchify output is [N, L, val_ch0_p0, val_ch1_p0, val_ch0_p1, val_ch1_p1 ...], then C is the fastest moving.
-            # From patchify: x = torch.einsum("nctuhpwq->nthwupqc", x) -> N, t, h, w, u, p, q, C_model
-            # Then reshape to (N, L, u * p**2 * C_model). So C_model is the last varying index within the patch dimension.
+            # From patchify: x = torch.einsum("nctuhpwq->nthwupqc", x) -> N, t, h, w, u, p, q, self.in_chans
+            # Then reshape to (N, L, u * p**2 * self.in_chans). So self.in_chans is the last varying index within the patch dimension.
             
-            pred_ch = pred[..., ch_idx::C_model]  # Selects every C-th element starting from ch_idx
-            target_ch = target[..., ch_idx::C_model]
+            pred_ch = pred[..., ch_idx::self.in_chans]  # Selects every C-th element starting from ch_idx
+            target_ch = target[..., ch_idx::self.in_chans]
 
             channel_loss_mse_per_element = (pred_ch - target_ch) ** 2
             channel_loss_mse_per_patch = channel_loss_mse_per_element.mean(dim=-1) # [N, L], mean loss per patch for this channel
