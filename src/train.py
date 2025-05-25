@@ -254,7 +254,7 @@ class TrainLoop:
                     for i_thresh, (thresh, label) in enumerate(zip(thresholds, threshold_labels)):
                         ax = axes_grid[t_idx_orig_offset, i_thresh]
                         mask_within = np.abs(pred_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] - target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig]) <= \
-                                        (np.abs(target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig]) * thresh + epsilon)
+                                        (thresh * target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] + epsilon) / (0.1 * target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] + epsilon)
                         
                         ax.imshow(mask_within, cmap='Greens', vmin=0, vmax=1)
                         for y_ax in range(H_orig):
@@ -379,7 +379,7 @@ class TrainLoop:
                 acc_within = {thresh: 0 for thresh in thresholds}
                 acc_total = pred_np.size
                 for thresh in thresholds:
-                    mask_within = np.abs(pred_np - target_np) <= (np.abs(target_np) * thresh + epsilon)
+                    mask_within = np.abs(pred_np - target_np) <= (thresh * target_np + epsilon) / (0.1 * target_np + epsilon)
                     acc_within[thresh] += np.sum(mask_within)
                 accuracy_metrics = {thresh: acc_within[thresh] / acc_total for thresh in thresholds}
 
