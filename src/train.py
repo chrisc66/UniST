@@ -82,8 +82,15 @@ class TrainLoop:
 
         # Un-normalize data to original scale using the per-channel scaler
         # The scaler expects torch.Tensor of shape [N, C, T, H, W]
-        pred_unnormalized_tensor = self.args.scaler[dataset_name].inverse_transform(pred_unpatched.detach().cpu())
-        target_unnormalized_tensor = self.args.scaler[dataset_name].inverse_transform(target_unpatched.detach().cpu())
+        # C_model here is args.model_input_channels
+        # We need to slice back to the original number of channels the scaler was trained on.
+        original_channels_for_scaler = self.args.scaler[dataset_name].num_channels
+
+        pred_unpatched_for_scaler = pred_unpatched[:, :original_channels_for_scaler, :, :, :].detach().cpu()
+        target_unpatched_for_scaler = target_unpatched[:, :original_channels_for_scaler, :, :, :].detach().cpu()
+
+        pred_unnormalized_tensor = self.args.scaler[dataset_name].inverse_transform(pred_unpatched_for_scaler)
+        target_unnormalized_tensor = self.args.scaler[dataset_name].inverse_transform(target_unpatched_for_scaler)
 
         pred_unnormalized = pred_unnormalized_tensor.numpy()
         target_unnormalized = target_unnormalized_tensor.numpy()

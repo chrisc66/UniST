@@ -82,6 +82,7 @@ def create_argparser():
         batch_size_2 = 32, # Batch size for second stage
         batch_size_3 = 16, # Batch size for third stage
         loss_channel_weights = [1.0, 1.0], # Weights for each channel in loss calculation
+        model_input_channels = 2, # Number of input channels the model expects
     )
     parser = argparse.ArgumentParser() # Create argument parser
     add_dict_to_argparser(parser, defaults) # Add default parameters to parser

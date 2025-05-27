@@ -180,6 +180,12 @@ def data_load_single(args, dataset):
         X_test_ts = torch.tensor(data_all['timestamps']['test'])
         X_val_ts = torch.tensor(data_all['timestamps']['val'])
 
+        # N, T, H, W
+        # add C = 2 (from args)
+        # N, C, T, H, W
+        # C[0]: event count
+        # C[1]: population = 0
+
     elif 'MciTRT' in dataset:
         # Direct tensor conversion
         print("Loading custom dataset")
@@ -209,6 +215,42 @@ def data_load_single(args, dataset):
         print(f"Warning: X_period for dataset {dataset} has {X_train_period.shape[1]} channels, "
               f"while scaler was fitted for {my_scaler.num_channels} channels. X_period will not be scaled by this scaler.")
 
+    # Store original channel count for later use in inverse transform
+    # This is already implicitly stored in my_scaler.num_channels
+
+    # Adapt channels to match args.model_input_channels
+    target_channels = args.model_input_channels
+
+    def adapt_channels(tensor, target_ch, original_ch_for_scaler):
+        N, C, T, H, W = tensor.shape
+        if C == target_ch:
+            return tensor
+        elif C < target_ch:
+            padding_size = target_ch - C
+            padding = torch.zeros((N, padding_size, T, H, W), dtype=tensor.dtype, device=tensor.device)
+            tensor_adapted = torch.cat([tensor, padding], dim=1)
+            print(f"Padded channels from {C} to {target_ch} for tensor shape {tensor.shape} -> {tensor_adapted.shape}")
+            return tensor_adapted
+        else: # C > target_ch
+            tensor_adapted = tensor[:, :target_ch, :, :, :]
+            print(f"Sliced channels from {C} to {target_ch} for tensor shape {tensor.shape} -> {tensor_adapted.shape}")
+            return tensor_adapted
+
+    X_train = adapt_channels(X_train, target_channels, my_scaler.num_channels)
+    X_test = adapt_channels(X_test, target_channels, my_scaler.num_channels)
+    X_val = adapt_channels(X_val, target_channels, my_scaler.num_channels)
+    
+    # Assuming X_period data should be scaled with the same parameters as X_train
+    # This requires X_period to have the same number of channels as X_train before scaling.
+    if X_train_period.shape[1] == my_scaler.num_channels: # Check original channels
+        X_train_period = my_scaler.transform(X_train_period)
+        X_test_period = my_scaler.transform(X_test_period)
+        X_val_period = my_scaler.transform(X_val_period)
+        
+        # Also adapt channels for periodic data
+        X_train_period = adapt_channels(X_train_period, target_channels, my_scaler.num_channels)
+        X_test_period = adapt_channels(X_test_period, target_channels, my_scaler.num_channels)
+        X_val_period = adapt_channels(X_val_period, target_channels, my_scaler.num_channels)
 
     """
         Creates list of data for each dataset

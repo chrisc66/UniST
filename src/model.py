@@ -32,7 +32,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6), # Normalization layer
             pos_emb = args.pos_emb, # Position embedding type from args
             no_qkv_bias = args.no_qkv_bias, # Whether to use bias in QKV transformation
-            in_chans = 2, # Number of input channels (original feature + population)
+            in_chans = args.model_input_channels, # Number of input channels from args
             args = args, # Pass the entire args object to the model
             **kwargs, # Additional keyword arguments
         )
@@ -52,7 +52,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
-            in_chans = 2, # Number of input channels (original feature + population)
+            in_chans = args.model_input_channels, # Number of input channels from args
             args = args,
             **kwargs,
         )
@@ -72,7 +72,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
-            in_chans = 2, # Number of input channels (original feature + population)
+            in_chans = args.model_input_channels, # Number of input channels from args
             args = args,
             **kwargs,
         )
@@ -92,7 +92,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
-            in_chans = 2, # Number of input channels (original feature + population)
+            in_chans = args.model_input_channels, # Number of input channels from args
             args = args,
             **kwargs,
         )
@@ -112,7 +112,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
-            in_chans = 2, # Number of input channels (original feature + population)
+            in_chans = args.model_input_channels, # Number of input channels from args
             args = args,
             **kwargs,
         )
@@ -132,7 +132,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
-            in_chans = 2, # Number of input channels (original feature + population)
+            in_chans = args.model_input_channels, # Number of input channels from args
             args = args,
             **kwargs,
         )
@@ -152,7 +152,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = args.no_qkv_bias,
-            in_chans = 2, # Number of input channels (original feature + population)
+            in_chans = args.model_input_channels, # Number of input channels from args
             args = args,
             **kwargs,
         )
@@ -172,7 +172,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = bool(args.no_qkv_bias),
-            in_chans = 2, # Number of input channels (original feature + population)
+            in_chans = args.model_input_channels, # Number of input channels from args
             args = args,
             **kwargs,
         )
@@ -192,7 +192,7 @@ def UniST_model(args, **kwargs):
             norm_layer=partial(nn.LayerNorm, eps=1e-6),
             pos_emb = args.pos_emb,
             no_qkv_bias = bool(args.no_qkv_bias),
-            in_chans = 2, # Number of input channels (original feature + population)
+            in_chans = args.model_input_channels, # Number of input channels from args
             args = args,
             **kwargs,
         )
@@ -455,6 +455,8 @@ class UniST(nn.Module):
         self.initialize_weights_trivial()
 
         print("model initialized!")
+
+        self._loss_channel_weights_warning_issued = False # Flag to ensure warning prints only once
 
 
     def init_emb(self):
@@ -816,7 +818,9 @@ class UniST(nn.Module):
         # Expected format for args.loss_channel_weights: a list of floats, e.g., [1.0, 1.0]
         channel_weights = getattr(self.args, 'loss_channel_weights', [1.0] * self.in_chans)
         if not isinstance(channel_weights, list) or len(channel_weights) != self.in_chans:
-            print(f"Warning: loss_channel_weights not properly defined in args or length mismatch. Defaulting to equal weights for {self.in_chans} channels.")
+            if not self._loss_channel_weights_warning_issued:
+                print(f"Warning: loss_channel_weights not properly defined in args or length mismatch. Defaulting to equal weights for {self.in_chans} channels.")
+                self._loss_channel_weights_warning_issued = True
             channel_weights = [1.0] * self.in_chans
         
         # Ensure weights sum to self.in_chans for averaging later, or normalize them
