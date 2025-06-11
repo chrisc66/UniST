@@ -368,15 +368,14 @@ class UniST(nn.Module):
 
         self.pos_emb = pos_emb
 
-        self.Embedding = DataEmbedding(in_chans, embed_dim, args=args, size1=53, size2=11)
+        self.Embedding = DataEmbedding(in_chans, embed_dim, args=args, size1=53, size2=30)
 
         #if 'TDrive' in args.dataset or 'BikeNYC2' in args.dataset:
-        self.Embedding_24 = DataEmbedding(in_chans, embed_dim, args=args, size1=53, size2=11)
+        self.Embedding_24 = DataEmbedding(in_chans, embed_dim, args=args, size1=53, size2=30)
 
         if args.prompt_ST != 0:
             self.st_prompt = Prompt_ST(args.num_memory_spatial, args.num_memory_temporal, embed_dim, self.args.his_len, args.conv_num, args=args)
             self.spatial_patch = SpatialPatchEmb(embed_dim, embed_dim, self.args.patch_size)
-
 
         # mask
         self.t_patch_size = t_patch_size
@@ -646,9 +645,8 @@ class UniST(nn.Module):
         else:
             x_period = self.Embedding.value_embedding(x_period).reshape(N, P, -1, self.embed_dim)
 
-        # x_period = x_period.permute(0,2,1,3).reshape(-1,x_period.shape[1],x_period.shape[-1])
-        Seq_out = 48 # MciTRTDT
-        # Seq_out = 726 # MciTRT
+        product_x_period = np.prod(x_period.shape)
+        Seq_out = product_x_period // (N * P * self.embed_dim)
         x_period = x_period.reshape(N, P, Seq_out, self.embed_dim) # (N, P, Seq_out, embed_dim)
         x_period_for_prompt = x_period.permute(0, 2, 1, 3) # (N, Seq_out, P, embed_dim)
         x_period_for_prompt = x_period_for_prompt.reshape(N * Seq_out, P, self.embed_dim) # (N*Seq_out, P, embed_dim)

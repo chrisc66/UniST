@@ -102,6 +102,7 @@ class TrainLoop:
         if plot:
             os.makedirs(f"{self.args.model_path}/plots", exist_ok=True)
 
+            """
             # 1. Masked Data (Plotting flattened masked values, might be very long)
             plt.figure(figsize=(100, 30))
 
@@ -179,6 +180,7 @@ class TrainLoop:
             plt.tight_layout()
             plt.savefig(f"{self.args.model_path}/plots/2_patched.png")
             plt.close()
+            """
 
             batch_idx_plot_list = range(1) # Index for selecting batch element for plotting
             ch_vis_idx = 0 # Channel index for visualization
@@ -260,8 +262,15 @@ class TrainLoop:
                 for t_idx_orig_offset, t_idx_orig in enumerate(range(T_orig // 2, T_orig)):
                     for i_thresh, (thresh, label) in enumerate(zip(thresholds, threshold_labels)):
                         ax = axes_grid[t_idx_orig_offset, i_thresh]
+                        # # Method 1: abs ( prediction - target ) <= threshold * target + epsilon
+                        # mask_within = np.abs(pred_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] - target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig]) <= \
+                        #     (thresh * target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] + epsilon) / (0.1 * target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] + epsilon)
+                        # # Method 2: abs ( prediction - target ) <= threshold * target + epsilon / (0.1 * target + epsilon)
+                        # mask_within = np.abs(pred_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] - target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig]) <= \
+                        #     (thresh * target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] + epsilon) / (0.1 * target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] + epsilon)
+                        # Method 3: abs ( prediction - target ) <= threshold * target + 1 / (ln(target + 1) + 1)
                         mask_within = np.abs(pred_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] - target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig]) <= \
-                                        (thresh * target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] + epsilon) / (0.1 * target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] + epsilon)
+                            (thresh * target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] + 1 / (np.log(target_unnormalized[batch_idx_plot, ch_vis_idx, t_idx_orig] + 1) + 1))
                         
                         ax.imshow(mask_within, cmap='Greens', vmin=0, vmax=1)
                         for y_ax in range(H_orig):
@@ -352,7 +361,9 @@ class TrainLoop:
         thresholds = [0.1, 0.3, 0.5, 0.7, 1.0, 3.0, 5.0]
         accuracy_metrics = {}
         epsilon = 1
-        rmse, mae, loss_test, num = 0, 0, 0, 0
+        rmse, mae = 0, 0
+        loss_test, num = 0, 0
+        mape, wmape = 0, 0
 
         with torch.no_grad():
             for idx, batch in enumerate(test_data[index]):
@@ -376,17 +387,33 @@ class TrainLoop:
                 else:
                     print(f"Calculating accuracy for all timesteps, shape: {pred_c0.shape}, T: {pred_c0.shape[1]}, his_len: {self.args.his_len}")
 
-                # Calculate RMSE and MAE
                 pred_np = pred_c0.flatten()
                 target_np = target_c0.flatten()
+                pred_np = np.nan_to_num(pred_np, nan=0.0)
+                target_np = np.nan_to_num(target_np, nan=0.0)
+
+                # Calculate RMSE and MAE
                 rmse += np.sqrt(mean_squared_error(pred_np, target_np))
                 mae += mean_absolute_error(pred_np, target_np)
 
-                # Calculate accuracy
+                # Calculate MAPE and WMAPE
+                nonzero_mask = np.abs(target_np) > 1e-8
+                if np.any(nonzero_mask):
+                    mape += np.mean(np.abs((target_np[nonzero_mask] - pred_np[nonzero_mask]) / target_np[nonzero_mask])) * 100
+                else:
+                    mape += 0.0
+                wmape += np.sum(np.abs(target_np - pred_np)) / (np.sum(np.abs(target_np)) + 1e-8) * 100
+
+                # Calculate Prediction Acceptance Rate
                 acc_within = {thresh: 0 for thresh in thresholds}
                 acc_total = pred_np.size
                 for thresh in thresholds:
-                    mask_within = np.abs(pred_np - target_np) <= (thresh * target_np + epsilon) / (0.1 * target_np + epsilon)
+                    # # Method 1: abs ( prediction - target ) <= threshold * target + epsilon
+                    # mask_within = np.abs(pred_np - target_np) <= (np.abs(target_np) * thresh + epsilon)
+                    # # Method 2: abs ( prediction - target ) <= threshold * target + epsilon / (0.1 * target + epsilon)
+                    # mask_within = np.abs(pred_np - target_np) <= (thresh * target_np + epsilon) / (0.1 * target_np + epsilon)
+                    # Method 3: abs ( prediction - target ) <= threshold * target + 1 / (ln(target + 1) + 1)
+                    mask_within = np.abs(pred_np - target_np) <= (thresh * target_np + 1 / (np.log(target_np + 1) + 1))
                     acc_within[thresh] += np.sum(mask_within)
                 accuracy_metrics = {thresh: acc_within[thresh] / acc_total for thresh in thresholds}
 
@@ -397,6 +424,8 @@ class TrainLoop:
         # Average metrics over all batches
         rmse /= len(test_data[index])
         mae /= len(test_data[index])
+        mape /= len(test_data[index])
+        wmape /= len(test_data[index])
         loss_test /= len(test_data[index])
 
         print(f"\n--- Event Prediction Acceptance Rate ---")
@@ -406,10 +435,12 @@ class TrainLoop:
         print(f"--- RMSE and MAE ---")
         print(f"RMSE: {rmse:.4f}")
         print(f"MAE: {mae:.4f}")
+        print(f"MAPE: {mape:.4f}%")
+        print(f"WMAPE: {wmape:.4f}%")
         print(f"Loss: {loss_test:.4f}")
         print(f"Num: {num}")
 
-        return rmse, mae, loss_test, accuracy_metrics
+        return rmse, mae, mape, wmape, loss_test, accuracy_metrics
 
 
     def Evaluation(self, test_data, epoch, seed=None, best=True, Type='val'):
@@ -426,12 +457,16 @@ class TrainLoop:
             if self.args.mask_strategy_random != 'none':
                 for s in self.mask_list:
                     for m in self.mask_list[s]:
-                        result, mae, loss_test, accuracy_metrics = self.Sample(test_data, epoch, mask_ratio=m, mask_strategy = s, seed=seed, dataset = dataset_name, index=index, Type=Type)
+                        result, mae, mape, wmape, loss_test, accuracy_metrics = self.Sample(
+                            test_data, epoch, mask_ratio=m, mask_strategy=s, seed=seed, dataset=dataset_name, index=index, Type=Type
+                        )
                         rmse_list.append(result)
                         loss_list.append(loss_test)
                         if s not in rmse_key_result[dataset_name]:
                             rmse_key_result[dataset_name][s] = {}
-                        rmse_key_result[dataset_name][s][m] = result
+                        rmse_key_result[dataset_name][s][m] = {
+                            'rmse': result, 'mae': mae, 'mape': mape, 'wmape': wmape
+                        }
                         
                         if Type == 'val':
                             self.writer.add_scalar('Evaluation/{}-{}-{}'.format(dataset_name.split('_C')[0], s, m), result, epoch)
@@ -442,7 +477,9 @@ class TrainLoop:
             else:
                 s = self.args.mask_strategy
                 m = self.args.mask_ratio
-                result, mae,  loss_test, accuracy_metrics = self.Sample(test_data, epoch, mask_ratio=m, mask_strategy = s, seed=seed, dataset = dataset_name, index=index, Type=Type)
+                result, mae, mape, wmape, loss_test, accuracy_metrics = self.Sample(
+                    test_data, epoch, mask_ratio=m, mask_strategy=s, seed=seed, dataset=dataset_name, index=index, Type=Type
+                )
                 rmse_list.append(result)
                 loss_list.append(loss_test)
                 if s not in rmse_key_result[dataset_name]:

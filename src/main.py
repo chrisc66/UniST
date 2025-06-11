@@ -28,7 +28,7 @@ def setup_init(seed):
 def dev(device_id='0'):
     """
     Get the device to use for torch.distributed.
-    # """
+    """
     if th.cuda.is_available():  # Check if GPU is available
         return th.device('cuda:{}'.format(device_id)) # Return CUDA device if available
     return th.device("cpu") # Return CPU device if GPU is not available 

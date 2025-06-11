@@ -186,7 +186,7 @@ def data_load_single(args, dataset):
         # C[0]: event count
         # C[1]: population = 0
 
-    elif 'MciTRT' in dataset:
+    elif 'MciTRT' in dataset or "CrimeOTT" in dataset or "CrimeVAN" in dataset:
         # Direct tensor conversion
         print("Loading custom dataset")
         X_train_ts = torch.tensor(data_all['timestamps']['train'])
